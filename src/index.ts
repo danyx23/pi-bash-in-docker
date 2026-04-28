@@ -345,17 +345,17 @@ export default function (pi: ExtensionAPI) {
 		default: false,
 	});
 
-	const localCwd = process.cwd();
+	const initialCwd = process.cwd();
 	const localOps = createLocalBashOperations();
 	let config: RuntimeConfig | undefined;
 
 	const dockerOps = createDockerBashOps(() => config, localOps);
-	const bashTool = createBashTool(localCwd, { operations: dockerOps });
+	const bashTool = createBashTool(initialCwd, { operations: dockerOps });
 
 	pi.registerTool({
 		...bashTool,
 		label: "bash (docker)",
-		execute: async (id, params, signal, onUpdate, _ctx) => bashTool.execute(id, params, signal, onUpdate),
+		execute: async (id, params, signal, onUpdate, ctx) => createBashTool(ctx.cwd, { operations: dockerOps }).execute(id, params, signal, onUpdate),
 	});
 
 	pi.registerTool({
@@ -374,6 +374,11 @@ export default function (pi: ExtensionAPI) {
 			timeoutSeconds: Type.Optional(Type.Number({ description: "Timeout for each docker compose step in seconds. Defaults to 600." })),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			if (!ctx.hasUI) {
+				throw new Error("docker_rebuild_restart requires an interactive/RPC UI confirmation.");
+			}
+
+			const localCwd = ctx.cwd;
 			if (!hasComposeFile(localCwd)) {
 				throw new Error("No compose.yaml/compose.yml/docker-compose.yaml/docker-compose.yml found in the Pi project cwd; cannot safely recreate the container from image metadata alone.");
 			}
@@ -433,7 +438,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		const candidate = loadConfig(pi, localCwd);
+		const candidate = loadConfig(pi, ctx.cwd);
 
 		try {
 			const running = await inspectRunning(candidate.container);
@@ -449,11 +454,13 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (candidate.check) await assertContainerReady(candidate);
 			config = candidate;
-			ctx.ui.setStatus("docker", ctx.ui.theme.fg("accent", `Docker: ${configSummary(config)}`));
-			ctx.ui.notify(`Docker bash enabled from ${sourceLabel(config)}: ${configSummary(config)}`, "info");
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("docker", ctx.ui.theme.fg("accent", `Docker: ${configSummary(config)}`));
+				ctx.ui.notify(`Docker bash enabled from ${sourceLabel(config)}: ${configSummary(config)}`, "info");
+			}
 		} catch (error) {
 			config = undefined;
-			if (candidate.source !== "default") {
+			if (candidate.source !== "default" && ctx.hasUI) {
 				ctx.ui.setStatus("docker", ctx.ui.theme.fg("error", "Docker: disabled"));
 				ctx.ui.notify(`Docker bash disabled: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
@@ -477,8 +484,9 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("docker-status", {
 		description: "Show configured Docker bash container status",
 		handler: async (_args, ctx) => {
-			const current = config ?? loadConfig(pi, localCwd);
+			const current = config ?? loadConfig(pi, ctx.cwd);
 			const result = await docker(["inspect", "-f", "name={{.Name}} running={{.State.Running}} image={{.Config.Image}}", current.container], { timeoutMs: 5_000 });
+			if (!ctx.hasUI) return;
 			if (result.exitCode === 0) ctx.ui.notify(`${result.stdout.trim().replace(/^name=\//, "name=")} source=${sourceLabel(current)}`, "info");
 			else ctx.ui.notify(result.stderr.trim() || `Container not found: ${current.container}`, current.source === "default" ? "warning" : "error");
 		},
@@ -487,14 +495,16 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("docker-start", {
 		description: "Start the configured Docker bash container (or /docker-start <container>)",
 		handler: async (args, ctx) => {
-			const current = loadConfig(pi, localCwd);
+			const current = loadConfig(pi, ctx.cwd);
 			const container = args.trim() || config?.container || current.container;
 			const result = await docker(["start", container], { timeoutMs: 30_000 });
 			if (result.exitCode === 0) {
 				config = { ...current, container };
-				ctx.ui.setStatus("docker", ctx.ui.theme.fg("accent", `Docker: ${configSummary(config)}`));
-				ctx.ui.notify(`Started Docker container: ${container}`, "info");
-			} else {
+				if (ctx.hasUI) {
+					ctx.ui.setStatus("docker", ctx.ui.theme.fg("accent", `Docker: ${configSummary(config)}`));
+					ctx.ui.notify(`Started Docker container: ${container}`, "info");
+				}
+			} else if (ctx.hasUI) {
 				ctx.ui.notify(result.stderr.trim() || `Failed to start container: ${container}`, "error");
 			}
 		},
@@ -503,14 +513,16 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("docker-stop", {
 		description: "Stop the configured Docker bash container (or /docker-stop <container>)",
 		handler: async (args, ctx) => {
-			const current = loadConfig(pi, localCwd);
+			const current = loadConfig(pi, ctx.cwd);
 			const container = args.trim() || config?.container || current.container;
 			const result = await docker(["stop", container], { timeoutMs: 30_000 });
 			if (result.exitCode === 0) {
 				if (config?.container === container) config = undefined;
-				ctx.ui.setStatus("docker", undefined);
-				ctx.ui.notify(`Stopped Docker container: ${container}`, "info");
-			} else {
+				if (ctx.hasUI) {
+					ctx.ui.setStatus("docker", undefined);
+					ctx.ui.notify(`Stopped Docker container: ${container}`, "info");
+				}
+			} else if (ctx.hasUI) {
 				ctx.ui.notify(result.stderr.trim() || `Failed to stop container: ${container}`, "error");
 			}
 		},
@@ -519,14 +531,14 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("docker-doctor", {
 		description: "Validate Docker bash container configuration",
 		handler: async (_args, ctx) => {
-			const current = config ?? loadConfig(pi, localCwd);
+			const current = config ?? loadConfig(pi, ctx.cwd);
 			try {
 				await assertContainerReady(current);
 				const pwd = await docker(["exec", "-w", current.containerCwd, current.container, current.shell, "-lc", "pwd && id && uname -a"], { timeoutMs: 10_000 });
 				if (pwd.exitCode !== 0) throw new Error(pwd.stderr.trim() || "docker exec check failed");
-				ctx.ui.notify(`Docker bash OK: ${configSummary(current)} (${sourceLabel(current)})\n${pwd.stdout.trim()}`, "info");
+				if (ctx.hasUI) ctx.ui.notify(`Docker bash OK: ${configSummary(current)} (${sourceLabel(current)})\n${pwd.stdout.trim()}`, "info");
 			} catch (error) {
-				ctx.ui.notify(`Docker doctor failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+				if (ctx.hasUI) ctx.ui.notify(`Docker doctor failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		},
 	});

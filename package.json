@@ -18,11 +18,18 @@
       "./skills"
     ]
   },
-  "dependencies": {
-    "typebox": "^1.1.24"
+  "scripts": {
+    "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@mariozechner/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@types/node": "^22.15.0",
+    "typebox": "^1.1.24",
+    "typescript": "^5.8.3"
   },
   "engines": {
     "node": ">=18"
