@@ -49,7 +49,7 @@ Only edit the Dockerfile after the user agrees. If the user asks directly to ins
    - Keep edits minimal.
    - Add packages to an existing install block when one exists.
    - Preserve lockfiles and project files.
-   - If no Dockerfile exists, use the `dockerfile-setup` skill first.
+   - If no Dockerfile exists, use the `docker-init` skill first.
 
 6. Rebuild the image and recreate the container.
    - If the project has a Compose file and the `docker_rebuild_restart` tool is available, prefer that tool. It runs from the host Pi process rather than from the Docker-routed bash tool, so it can access the host Docker daemon even when normal bash commands run inside the container.

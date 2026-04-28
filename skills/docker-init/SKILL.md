@@ -118,7 +118,7 @@ If the user asks for a non-interactive/default setup, choose sensible defaults a
      "autoStart": true
    }
    ```
-   Create `.pi/` if needed. This lets the user run plain `pi` after installing the package with `pi install ~/pi-bash-in-docker`.
+   Create `.pi/` if needed. This lets the user run plain `pi` after installing the public package.
 
 9. Create or update compose if the user wants lifecycle convenience.
    A good default compose file for this extension:

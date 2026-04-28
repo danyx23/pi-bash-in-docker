@@ -11,13 +11,7 @@ This skill assumes Pi itself runs on the host and the `pi-bash-in-docker` extens
 
 ## Extension Basics
 
-If the package is installed with:
-
-```bash
-pi install ~/pi-bash-in-docker
-```
-
-then flags are optional when the project has `.pi/bash-in-docker.json` or when a running default container named `pi-tools` exists.
+If this package is installed, flags are optional when the project has `.pi/bash-in-docker.json` or when a running default container named `pi-tools` exists.
 
 Recommended project config:
 
@@ -39,10 +33,10 @@ pi
 
 The extension decides whether to enable Docker bash during Pi session startup. If project config or the container is created from inside an already-running Pi session, restart Pi or use `/docker-start` before expecting Pi `bash` tool calls and user `!` commands to route into Docker.
 
-For one-off use without installing or without project config:
+For use without project config, start Pi with explicit Docker flags:
 
 ```bash
-pi -e ~/pi-bash-in-docker \
+pi \
   --docker-container pi-tools \
   --docker-cwd /workspace \
   --docker-check
@@ -189,16 +183,16 @@ Find the actual container name/id:
 docker compose ps -q pi-tools
 ```
 
-Then create `.pi/bash-in-docker.json` as shown above and start Pi normally if the package is installed:
+Then create `.pi/bash-in-docker.json` as shown above and start Pi normally:
 
 ```bash
 pi
 ```
 
-For one-off use without project config:
+For use without project config, start Pi with explicit Docker flags:
 
 ```bash
-pi -e ~/pi-bash-in-docker \
+pi \
   --docker-container "$(docker compose ps -q pi-tools)" \
   --docker-cwd /workspace \
   --docker-check

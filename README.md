@@ -1,39 +1,45 @@
 # pi-bash-in-docker
 
-Pi package that keeps Pi running on the host while routing `bash` tool calls and user `!` commands into a Docker container.
+A public Pi extension that keeps Pi running on the host while routing Pi's `bash` tool calls and user `!` commands into a Docker container.
 
-This is useful on macOS when you want native host integrations such as Glimpse, but you want builds/tests/dev commands to run in Linux/Docker.
+This is useful on macOS when you want native host integrations such as Glimpse, but want builds, tests, package installs, and dev commands to run in Linux/Docker.
 
-## Install / Use Locally
+## Install
 
-Try it without installing:
-
-```bash
-pi -e ~/pi-bash-in-docker \
-  --docker-container pi-tools \
-  --docker-cwd /workspace \
-  --docker-check
-```
-
-Install as a local package:
+Install the extension from GitHub:
 
 ```bash
-pi install ~/pi-bash-in-docker
+pi install https://github.com/danyx23/pi-bash-in-docker
 ```
 
-After installation, flags are optional. The extension will:
-
-1. read project config from `.pi/bash-in-docker.json` or `.pi/docker-bash.json` when present;
-2. otherwise use `PI_DOCKER_*` environment variables when present;
-3. otherwise quietly use the default container name `pi-tools` if that container exists and is running.
-
-With a project config or a running `pi-tools` container, simply start Pi normally:
+Then start Pi normally from a project that has Docker bash configured:
 
 ```bash
 pi
 ```
 
-The extension reads project config and decides whether to enable Docker bash at Pi session startup. If you create `.pi/bash-in-docker.json`, create/start the container, or change Docker flags from inside an already-running Pi session, start a new Pi session (or use `/docker-start`) before expecting `bash` tool calls and `!` commands to route into Docker.
+The extension enables Docker routing at Pi session startup when it finds configuration or a suitable running container. If you create `.pi/bash-in-docker.json`, create/start the container, or change Docker settings inside an already-running Pi session, start a new Pi session or use `/docker-start` before expecting `bash` tool calls and `!` commands to route into Docker.
+
+## How Activation Works
+
+The extension checks configuration in this order:
+
+1. CLI flags;
+2. project config at `.pi/bash-in-docker.json` or `.pi/docker-bash.json`;
+3. `PI_DOCKER_*` environment variables;
+4. a running default container named `pi-tools`.
+
+With project config or a running `pi-tools` container, plain `pi` is enough.
+
+## Quick Project Setup
+
+Inside Pi, use the included setup skill:
+
+```text
+/skill:docker-init
+```
+
+It can create or improve a project `Dockerfile`, `.dockerignore`, Compose setup, and `.pi/bash-in-docker.json` so future sessions work without flags.
 
 ## Verify Activation
 
@@ -80,7 +86,7 @@ docker run -d \
 
 ## Project Config
 
-Create `.pi/bash-in-docker.json` in a project to make all flags optional:
+Create `.pi/bash-in-docker.json` in a project to make flags optional:
 
 ```json
 {
@@ -92,7 +98,7 @@ Create `.pi/bash-in-docker.json` in a project to make all flags optional:
 }
 ```
 
-`autoStart: true` lets the extension start an existing stopped container on Pi startup. If the container does not exist, create it with `docker run` or compose first.
+`autoStart: true` lets the extension start an existing stopped container on Pi startup. If the container does not exist, create it with `docker run` or Compose first.
 
 ## Flags
 
@@ -121,7 +127,7 @@ It also registers:
 docker_rebuild_restart
 ```
 
-`docker_rebuild_restart` runs from the host Pi process, not from inside the Docker-routed bash tool. Use it after changing a Dockerfile or compose setup when the image must be rebuilt and the configured container recreated. It requires a Compose file and runs the host equivalent of:
+`docker_rebuild_restart` runs from the host Pi process, not from inside the Docker-routed bash tool. Use it after changing a Dockerfile or Compose setup when the image must be rebuilt and the configured container recreated. It requires a Compose file and runs the host equivalent of:
 
 ```bash
 docker compose build <service>
