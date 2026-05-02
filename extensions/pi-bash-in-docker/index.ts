@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { createBashTool, createLocalBashOperations, type BashOperations } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -41,6 +41,8 @@ type ExecResult = {
 	stdout: string;
 	stderr: string;
 };
+
+type ContainerState = "running" | "stopped" | "missing" | "unknown";
 
 const DEFAULT_CONTAINER = "pi-tools";
 const DEFAULT_CONTAINER_CWD = "/workspace";
@@ -230,10 +232,22 @@ function createDockerBashOps(getConfig: () => RuntimeConfig | undefined, localOp
 	};
 }
 
+async function inspectContainerState(container: string): Promise<{ state: ContainerState; error?: string }> {
+	try {
+		const result = await docker(["inspect", "-f", "{{.State.Running}}", container], { timeoutMs: 5_000 });
+		if (result.exitCode === 0) return { state: result.stdout.trim() === "true" ? "running" : "stopped" };
+		const error = result.stderr.trim() || result.stdout.trim() || `Container not found: ${container}`;
+		return { state: /no such object|not found/i.test(error) ? "missing" : "unknown", error };
+	} catch (error) {
+		return { state: "unknown", error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
 async function inspectRunning(container: string): Promise<boolean> {
-	const result = await docker(["inspect", "-f", "{{.State.Running}}", container], { timeoutMs: 5_000 });
-	if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `Container not found: ${container}`);
-	return result.stdout.trim() === "true";
+	const result = await inspectContainerState(container);
+	if (result.state === "running") return true;
+	if (result.state === "stopped") return false;
+	throw new Error(result.error || `Container not found: ${container}`);
 }
 
 async function assertContainerReady(config: DockerConfig): Promise<void> {
@@ -292,6 +306,23 @@ function summarizeStep(label: string, args: string[], result: ExecResult): strin
 	return [`$ ${formatDockerCommand(args)}`, `${label}: exit ${result.exitCode}`, tail].filter(Boolean).join("\n");
 }
 
+function setBashStatus(ctx: ExtensionContext, candidate: RuntimeConfig | undefined, state: ContainerState | undefined, routedToDocker: boolean): void {
+	if (!ctx.hasUI) return;
+	const theme = ctx.ui.theme;
+	if (routedToDocker && candidate) {
+		ctx.ui.setStatus("docker", `${theme.fg("success", "Bash: docker")} ${theme.fg("accent", configSummary(candidate))} ${theme.fg("dim", "● running")}`);
+		return;
+	}
+	const host = theme.fg("dim", "Bash: host");
+	if (!candidate || !state) {
+		ctx.ui.setStatus("docker", host);
+		return;
+	}
+	const dockerState = state === "missing" ? `${candidate.container} missing` : `${configSummary(candidate)} ${state}`;
+	const color = state === "missing" ? "error" : state === "stopped" ? "warning" : "dim";
+	ctx.ui.setStatus("docker", `${host} ${theme.fg(color, `(docker ${dockerState})`)}`);
+}
+
 async function inferComposeService(localCwd: string, requestedService?: string): Promise<string> {
 	if (requestedService?.trim()) return requestedService.trim();
 
@@ -348,6 +379,41 @@ export default function (pi: ExtensionAPI) {
 	const initialCwd = process.cwd();
 	const localOps = createLocalBashOperations();
 	let config: RuntimeConfig | undefined;
+	let statusTimer: NodeJS.Timeout | undefined;
+
+	async function refreshDockerMode(ctx: ExtensionContext, options?: { notify?: boolean; allowAutoStart?: boolean }): Promise<void> {
+		const candidate = loadConfig(pi, ctx.cwd);
+		let state = await inspectContainerState(candidate.container);
+
+		try {
+			if (state.state === "stopped" && candidate.autoStart && options?.allowAutoStart) {
+				const started = await docker(["start", candidate.container], { timeoutMs: 30_000 });
+				if (started.exitCode !== 0) throw new Error(started.stderr.trim() || `docker start failed: ${candidate.container}`);
+				state = await inspectContainerState(candidate.container);
+			}
+
+			if (state.state === "running") {
+				if (candidate.check) await assertContainerReady(candidate);
+				config = candidate;
+				setBashStatus(ctx, candidate, state.state, true);
+				if (options?.notify && ctx.hasUI) ctx.ui.notify(`Docker bash enabled from ${sourceLabel(candidate)}: ${configSummary(candidate)}`, "info");
+				return;
+			}
+
+			config = undefined;
+			setBashStatus(ctx, candidate, state.state, false);
+			if (options?.notify && ctx.hasUI && candidate.source !== "default") {
+				const reason = state.error || `Container is ${state.state}: ${candidate.container}`;
+				ctx.ui.notify(`Docker bash disabled; bash commands run on host: ${reason}`, state.state === "stopped" ? "warning" : "error");
+			}
+		} catch (error) {
+			config = undefined;
+			setBashStatus(ctx, candidate, "unknown", false);
+			if (options?.notify && ctx.hasUI && candidate.source !== "default") {
+				ctx.ui.notify(`Docker bash disabled; bash commands run on host: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		}
+	}
 
 	const dockerOps = createDockerBashOps(() => config, localOps);
 	const bashTool = createBashTool(initialCwd, { operations: dockerOps });
@@ -416,7 +482,7 @@ export default function (pi: ExtensionAPI) {
 			try {
 				await assertContainerReady(current);
 				config = current;
-				ctx.ui.setStatus("docker", ctx.ui.theme.fg("accent", `Docker: ${configSummary(config)}`));
+				setBashStatus(ctx, current, "running", true);
 				const check = await docker(["exec", "-w", current.containerCwd, current.container, current.shell, "-lc", "pwd && id && uname -s"], { timeoutMs: 10_000 });
 				verification = check.stdout.trim();
 				append(`Verification for ${configSummary(current)}:\n${verification}`);
@@ -438,33 +504,19 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		const candidate = loadConfig(pi, ctx.cwd);
-
-		try {
-			const running = await inspectRunning(candidate.container);
-			if (!running) {
-				if (candidate.autoStart) {
-					const started = await docker(["start", candidate.container], { timeoutMs: 30_000 });
-					if (started.exitCode !== 0) throw new Error(started.stderr.trim() || `docker start failed: ${candidate.container}`);
-				} else if (candidate.source === "default") {
-					return;
-				} else {
-					throw new Error(`Container is not running: ${candidate.container} (use /docker-start or enable autoStart)`);
-				}
-			}
-			if (candidate.check) await assertContainerReady(candidate);
-			config = candidate;
-			if (ctx.hasUI) {
-				ctx.ui.setStatus("docker", ctx.ui.theme.fg("accent", `Docker: ${configSummary(config)}`));
-				ctx.ui.notify(`Docker bash enabled from ${sourceLabel(config)}: ${configSummary(config)}`, "info");
-			}
-		} catch (error) {
-			config = undefined;
-			if (candidate.source !== "default" && ctx.hasUI) {
-				ctx.ui.setStatus("docker", ctx.ui.theme.fg("error", "Docker: disabled"));
-				ctx.ui.notify(`Docker bash disabled: ${error instanceof Error ? error.message : String(error)}`, "error");
-			}
+		await refreshDockerMode(ctx, { notify: true, allowAutoStart: true });
+		if (statusTimer) clearInterval(statusTimer);
+		if (ctx.hasUI) {
+			statusTimer = setInterval(() => {
+				void refreshDockerMode(ctx);
+			}, 10_000);
+			statusTimer.unref?.();
 		}
+	});
+
+	pi.on("session_shutdown", () => {
+		if (statusTimer) clearInterval(statusTimer);
+		statusTimer = undefined;
 	});
 
 	pi.on("user_bash", () => {
@@ -484,11 +536,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("docker-status", {
 		description: "Show configured Docker bash container status",
 		handler: async (_args, ctx) => {
+			await refreshDockerMode(ctx);
 			const current = config ?? loadConfig(pi, ctx.cwd);
 			const result = await docker(["inspect", "-f", "name={{.Name}} running={{.State.Running}} image={{.Config.Image}}", current.container], { timeoutMs: 5_000 });
 			if (!ctx.hasUI) return;
-			if (result.exitCode === 0) ctx.ui.notify(`${result.stdout.trim().replace(/^name=\//, "name=")} source=${sourceLabel(current)}`, "info");
-			else ctx.ui.notify(result.stderr.trim() || `Container not found: ${current.container}`, current.source === "default" ? "warning" : "error");
+			const route = config ? "bash=docker" : "bash=host";
+			if (result.exitCode === 0) ctx.ui.notify(`${result.stdout.trim().replace(/^name=\//, "name=")} ${route} source=${sourceLabel(current)}`, "info");
+			else ctx.ui.notify(`${result.stderr.trim() || `Container not found: ${current.container}`} ${route}`, current.source === "default" ? "warning" : "error");
 		},
 	});
 
@@ -501,7 +555,7 @@ export default function (pi: ExtensionAPI) {
 			if (result.exitCode === 0) {
 				config = { ...current, container };
 				if (ctx.hasUI) {
-					ctx.ui.setStatus("docker", ctx.ui.theme.fg("accent", `Docker: ${configSummary(config)}`));
+					setBashStatus(ctx, config, "running", true);
 					ctx.ui.notify(`Started Docker container: ${container}`, "info");
 				}
 			} else if (ctx.hasUI) {
@@ -519,8 +573,8 @@ export default function (pi: ExtensionAPI) {
 			if (result.exitCode === 0) {
 				if (config?.container === container) config = undefined;
 				if (ctx.hasUI) {
-					ctx.ui.setStatus("docker", undefined);
-					ctx.ui.notify(`Stopped Docker container: ${container}`, "info");
+					setBashStatus(ctx, { ...current, container }, "stopped", false);
+					ctx.ui.notify(`Stopped Docker container: ${container}; bash commands run on host`, "info");
 				}
 			} else if (ctx.hasUI) {
 				ctx.ui.notify(result.stderr.trim() || `Failed to stop container: ${container}`, "error");
