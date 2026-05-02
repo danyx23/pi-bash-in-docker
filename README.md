@@ -18,18 +18,19 @@ Then start Pi normally from a project that has Docker bash configured:
 pi
 ```
 
-The extension enables Docker routing at Pi session startup when it finds configuration or a suitable running container. If you create `.pi/bash-in-docker.json`, create/start the container, or change Docker settings inside an already-running Pi session, start a new Pi session or use `/docker-start` before expecting `bash` tool calls and `!` commands to route into Docker.
+The extension enables Docker routing at Pi session startup only when Docker mode is explicitly configured. If you create `.pi/bash-in-docker.json`, create/start the container, or change Docker settings inside an already-running Pi session, start a new Pi session or use `/docker-start` before expecting `bash` tool calls and `!` commands to route into Docker.
 
 ## How Activation Works
 
-The extension checks configuration in this order:
+The extension stays inert by default so it can coexist with other extensions that override `bash`, such as `pi-ssh`.
 
-1. CLI flags;
+It activates only when one of these explicit configuration sources exists:
+
+1. `--docker-container <name-or-id>` CLI flag;
 2. project config at `.pi/bash-in-docker.json` or `.pi/docker-bash.json`;
-3. `PI_DOCKER_*` environment variables;
-4. a running default container named `pi-tools`.
+3. `PI_DOCKER_CONTAINER` environment variable.
 
-With project config or a running `pi-tools` container, plain `pi` is enough.
+With project config, plain `pi` is enough. Without one of those activation sources, the extension does not override Pi's built-in `bash` tool.
 
 ## Quick Project Setup
 
@@ -105,7 +106,7 @@ Create `.pi/bash-in-docker.json` in a project to make flags optional:
 Flags override project config:
 
 ```text
---docker-container <name-or-id>   Container for Docker bash routing (default: pi-tools when present)
+--docker-container <name-or-id>   Activate Docker bash routing for this container
 --docker-cwd <path>               Container cwd corresponding to host cwd, default /workspace
 --docker-local-cwd <path>         Host cwd corresponding to docker-cwd, default process.cwd()
 --docker-shell <shell>            Shell inside the container, default sh

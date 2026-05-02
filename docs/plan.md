@@ -100,14 +100,15 @@ This avoids container startup overhead for every Pi bash invocation.
 
 ## Configuration and CLI Flags
 
-After the package is installed, Docker bash routing should work without extra flags when a project config exists or when the default running container exists.
+After the package is installed, Docker bash routing should work without extra flags when a project config exists. Without explicit Docker configuration, the extension should stay inert so other `bash`-overriding extensions can coexist.
 
-Resolution order:
+Activation/config resolution order:
 
-1. CLI flags
+1. `--docker-container` CLI flag
 2. project config: `.pi/bash-in-docker.json` or `.pi/docker-bash.json`
-3. `PI_DOCKER_*` environment variables
-4. quiet auto-detection of a running container named `pi-tools`
+3. `PI_DOCKER_CONTAINER` environment variable
+
+Other `PI_DOCKER_*` values tune an active configuration but do not activate Docker mode by themselves.
 
 Recommended project config:
 

@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { createBashTool, createLocalBashOperations, type BashOperations } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 
-type ConfigSource = "flag" | "project" | "env" | "default";
+type ConfigSource = "flag" | "project" | "env";
 
 type DockerConfig = {
 	container: string;
@@ -259,24 +259,31 @@ async function assertContainerReady(config: DockerConfig): Promise<void> {
 	}
 }
 
-function loadConfig(pi: ExtensionAPI, defaultLocalCwd: string): RuntimeConfig {
-	const project = loadProjectConfig(defaultLocalCwd) ?? {};
+function loadConfig(pi: ExtensionAPI, defaultLocalCwd: string): RuntimeConfig | undefined {
+	const project = loadProjectConfig(defaultLocalCwd);
+	const projectConfig = project ?? {};
 	const flaggedContainer = flagString(pi, "docker-container");
-	const projectContainer = project.container ?? project.containerName;
+	const projectContainer = projectConfig.container ?? projectConfig.containerName;
 	const envContainer = envString("PI_DOCKER_CONTAINER");
+
+	// Stay inert unless Docker bash mode is explicitly requested. This lets other
+	// extensions that override bash (for example pi-ssh) coexist when Docker mode
+	// was not selected for the current Pi session/project.
+	if (!flaggedContainer && !project && !envContainer) return undefined;
+
 	const container = pickString(flaggedContainer, projectContainer, envContainer, DEFAULT_CONTAINER)!;
-	const source: ConfigSource = flaggedContainer ? "flag" : projectContainer ? "project" : envContainer ? "env" : "default";
+	const source: ConfigSource = flaggedContainer ? "flag" : project ? "project" : "env";
 
 	return {
 		container,
-		localCwd: pickString(flagString(pi, "docker-local-cwd"), project.localCwd, project.hostCwd, envString("PI_DOCKER_LOCAL_CWD"), defaultLocalCwd)!,
-		containerCwd: pickString(flagString(pi, "docker-cwd"), project.containerCwd, project.cwd, envString("PI_DOCKER_CWD"), DEFAULT_CONTAINER_CWD)!,
-		shell: pickString(flagString(pi, "docker-shell"), project.shell, envString("PI_DOCKER_SHELL"), DEFAULT_SHELL)!,
-		user: pickString(flagString(pi, "docker-user"), project.user, envString("PI_DOCKER_USER")),
-		env: [...envEntries(project.env), ...parseEnvList(envString("PI_DOCKER_ENV")), ...parseEnvList(flagString(pi, "docker-env"))],
+		localCwd: pickString(flagString(pi, "docker-local-cwd"), projectConfig.localCwd, projectConfig.hostCwd, envString("PI_DOCKER_LOCAL_CWD"), defaultLocalCwd)!,
+		containerCwd: pickString(flagString(pi, "docker-cwd"), projectConfig.containerCwd, projectConfig.cwd, envString("PI_DOCKER_CWD"), DEFAULT_CONTAINER_CWD)!,
+		shell: pickString(flagString(pi, "docker-shell"), projectConfig.shell, envString("PI_DOCKER_SHELL"), DEFAULT_SHELL)!,
+		user: pickString(flagString(pi, "docker-user"), projectConfig.user, envString("PI_DOCKER_USER")),
+		env: [...envEntries(projectConfig.env), ...parseEnvList(envString("PI_DOCKER_ENV")), ...parseEnvList(flagString(pi, "docker-env"))],
 		source,
-		autoStart: flagBoolean(pi, "docker-auto-start") || asBoolean(project.autoStart) || envBoolean("PI_DOCKER_AUTO_START"),
-		check: flagBoolean(pi, "docker-check") || asBoolean(project.check) || envBoolean("PI_DOCKER_CHECK"),
+		autoStart: flagBoolean(pi, "docker-auto-start") || asBoolean(projectConfig.autoStart) || envBoolean("PI_DOCKER_AUTO_START"),
+		check: flagBoolean(pi, "docker-check") || asBoolean(projectConfig.check) || envBoolean("PI_DOCKER_CHECK"),
 	};
 }
 
@@ -285,7 +292,7 @@ function configSummary(config: DockerConfig): string {
 }
 
 function sourceLabel(config: RuntimeConfig): string {
-	return config.source === "default" ? "default" : `${config.source} config`;
+	return `${config.source} config`;
 }
 
 function hasComposeFile(localCwd: string): boolean {
@@ -342,7 +349,7 @@ async function inferComposeService(localCwd: string, requestedService?: string):
 
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag("docker-container", {
-		description: "Run bash commands inside this Docker container (default: pi-tools when present)",
+		description: "Activate Docker bash routing for this container",
 		type: "string",
 	});
 	pi.registerFlag("docker-cwd", {
@@ -383,6 +390,12 @@ export default function (pi: ExtensionAPI) {
 
 	async function refreshDockerMode(ctx: ExtensionContext, options?: { notify?: boolean; allowAutoStart?: boolean }): Promise<void> {
 		const candidate = loadConfig(pi, ctx.cwd);
+		if (!candidate) {
+			config = undefined;
+			setBashStatus(ctx, undefined, undefined, false);
+			return;
+		}
+		ensureBashOverrideRegistered();
 		let state = await inspectContainerState(candidate.container);
 
 		try {
@@ -402,27 +415,32 @@ export default function (pi: ExtensionAPI) {
 
 			config = undefined;
 			setBashStatus(ctx, candidate, state.state, false);
-			if (options?.notify && ctx.hasUI && candidate.source !== "default") {
+			if (options?.notify && ctx.hasUI) {
 				const reason = state.error || `Container is ${state.state}: ${candidate.container}`;
 				ctx.ui.notify(`Docker bash disabled; bash commands run on host: ${reason}`, state.state === "stopped" ? "warning" : "error");
 			}
 		} catch (error) {
 			config = undefined;
 			setBashStatus(ctx, candidate, "unknown", false);
-			if (options?.notify && ctx.hasUI && candidate.source !== "default") {
+			if (options?.notify && ctx.hasUI) {
 				ctx.ui.notify(`Docker bash disabled; bash commands run on host: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		}
 	}
 
 	const dockerOps = createDockerBashOps(() => config, localOps);
-	const bashTool = createBashTool(initialCwd, { operations: dockerOps });
+	let bashOverrideRegistered = false;
 
-	pi.registerTool({
-		...bashTool,
-		label: "bash (docker)",
-		execute: async (id, params, signal, onUpdate, ctx) => createBashTool(ctx.cwd, { operations: dockerOps }).execute(id, params, signal, onUpdate),
-	});
+	function ensureBashOverrideRegistered(): void {
+		if (bashOverrideRegistered) return;
+		bashOverrideRegistered = true;
+		const bashTool = createBashTool(initialCwd, { operations: dockerOps });
+		pi.registerTool({
+			...bashTool,
+			label: "bash (docker)",
+			execute: async (id, params, signal, onUpdate, ctx) => createBashTool(ctx.cwd, { operations: dockerOps }).execute(id, params, signal, onUpdate),
+		});
+	}
 
 	pi.registerTool({
 		name: "docker_rebuild_restart",
@@ -452,6 +470,10 @@ export default function (pi: ExtensionAPI) {
 			const service = await inferComposeService(localCwd, params.service);
 			const timeoutMs = Math.max(1, params.timeoutSeconds ?? 600) * 1000;
 			const current = loadConfig(pi, localCwd);
+			if (!current) {
+				throw new Error("Docker bash mode is not configured. Start Pi with --docker-container <name>, set PI_DOCKER_CONTAINER, or add .pi/bash-in-docker.json.");
+			}
+			ensureBashOverrideRegistered();
 			const steps: string[] = [];
 			const append = (text: string) => {
 				steps.push(text);
@@ -521,6 +543,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("user_bash", () => {
 		if (!config) return;
+		ensureBashOverrideRegistered();
 		return { operations: dockerOps };
 	});
 
@@ -538,22 +561,42 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			await refreshDockerMode(ctx);
 			const current = config ?? loadConfig(pi, ctx.cwd);
+			if (!current) {
+				if (ctx.hasUI) ctx.ui.notify("Docker bash mode is inactive. Start Pi with --docker-container <name>, set PI_DOCKER_CONTAINER, or add .pi/bash-in-docker.json.", "info");
+				return;
+			}
 			const result = await docker(["inspect", "-f", "name={{.Name}} running={{.State.Running}} image={{.Config.Image}}", current.container], { timeoutMs: 5_000 });
 			if (!ctx.hasUI) return;
 			const route = config ? "bash=docker" : "bash=host";
 			if (result.exitCode === 0) ctx.ui.notify(`${result.stdout.trim().replace(/^name=\//, "name=")} ${route} source=${sourceLabel(current)}`, "info");
-			else ctx.ui.notify(`${result.stderr.trim() || `Container not found: ${current.container}`} ${route}`, current.source === "default" ? "warning" : "error");
+			else ctx.ui.notify(`${result.stderr.trim() || `Container not found: ${current.container}`} ${route}`, "error");
 		},
 	});
 
 	pi.registerCommand("docker-start", {
 		description: "Start the configured Docker bash container (or /docker-start <container>)",
 		handler: async (args, ctx) => {
+			const requested = args.trim();
 			const current = loadConfig(pi, ctx.cwd);
-			const container = args.trim() || config?.container || current.container;
+			if (!current && !requested) {
+				if (ctx.hasUI) ctx.ui.notify("Docker bash mode is inactive. Pass a container name: /docker-start <container>", "warning");
+				return;
+			}
+			const container = requested || config?.container || current!.container;
+			const nextConfig: RuntimeConfig = current ?? {
+				container,
+				localCwd: ctx.cwd,
+				containerCwd: DEFAULT_CONTAINER_CWD,
+				shell: DEFAULT_SHELL,
+				env: [],
+				source: "flag",
+				autoStart: false,
+				check: false,
+			};
 			const result = await docker(["start", container], { timeoutMs: 30_000 });
 			if (result.exitCode === 0) {
-				config = { ...current, container };
+				ensureBashOverrideRegistered();
+				config = { ...nextConfig, container };
 				if (ctx.hasUI) {
 					setBashStatus(ctx, config, "running", true);
 					ctx.ui.notify(`Started Docker container: ${container}`, "info");
@@ -567,13 +610,28 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("docker-stop", {
 		description: "Stop the configured Docker bash container (or /docker-stop <container>)",
 		handler: async (args, ctx) => {
+			const requested = args.trim();
 			const current = loadConfig(pi, ctx.cwd);
-			const container = args.trim() || config?.container || current.container;
+			if (!current && !config && !requested) {
+				if (ctx.hasUI) ctx.ui.notify("Docker bash mode is inactive. Pass a container name: /docker-stop <container>", "warning");
+				return;
+			}
+			const container = requested || config?.container || current!.container;
+			const statusConfig = current ?? config ?? {
+				container,
+				localCwd: ctx.cwd,
+				containerCwd: DEFAULT_CONTAINER_CWD,
+				shell: DEFAULT_SHELL,
+				env: [],
+				source: "flag" as const,
+				autoStart: false,
+				check: false,
+			};
 			const result = await docker(["stop", container], { timeoutMs: 30_000 });
 			if (result.exitCode === 0) {
 				if (config?.container === container) config = undefined;
 				if (ctx.hasUI) {
-					setBashStatus(ctx, { ...current, container }, "stopped", false);
+					setBashStatus(ctx, { ...statusConfig, container }, "stopped", false);
 					ctx.ui.notify(`Stopped Docker container: ${container}; bash commands run on host`, "info");
 				}
 			} else if (ctx.hasUI) {
@@ -586,6 +644,10 @@ export default function (pi: ExtensionAPI) {
 		description: "Validate Docker bash container configuration",
 		handler: async (_args, ctx) => {
 			const current = config ?? loadConfig(pi, ctx.cwd);
+			if (!current) {
+				if (ctx.hasUI) ctx.ui.notify("Docker bash mode is inactive. Start Pi with --docker-container <name>, set PI_DOCKER_CONTAINER, or add .pi/bash-in-docker.json.", "warning");
+				return;
+			}
 			try {
 				await assertContainerReady(current);
 				const pwd = await docker(["exec", "-w", current.containerCwd, current.container, current.shell, "-lc", "pwd && id && uname -a"], { timeoutMs: 10_000 });
