@@ -90,7 +90,8 @@ If the user asks for a non-interactive/default setup, choose sensible defaults a
 6. Make the container suitable for long-running `docker exec` usage.
    - The container command can be `sleep infinity` in compose/run docs.
    - Recommend `--init` or `init: true`.
-   - The extension will use `docker exec -i -w /workspace <container> sh -lc '<command>'`.
+   - The extension will use `docker exec -i -w /workspace [-u <user>] [-e KEY=VALUE] <container> sh -lc '<command>'`.
+   - If the image has a non-root runtime user, include that same user in `.pi/pi-bash-in-docker/config.json` as `"user": "<name-or-uid>"` so Pi-created files and `~` match the devcontainer user.
 
 7. Create the Docker build ignore file for the chosen Docker file location.
    - If Docker files live at the project root, create/update root `.dockerignore`.
@@ -123,10 +124,16 @@ If the user asks for a non-interactive/default setup, choose sensible defaults a
      "shell": "sh",
      "check": true,
      "autoStart": true,
-     "stopOnLastExit": false
+     "stopOnLastExit": false,
+     "composeFile": ".pi/pi-bash-in-docker/compose.yaml",
+     "composeService": "pi-tools"
    }
    ```
-   Create `.pi/pi-bash-in-docker/` if needed. This lets the user run plain `pi` after installing the public package. Set `stopOnLastExit` to `true` only if the user wants the extension to stop the container/Compose service when the last Pi process using this config quits.
+   Create `.pi/pi-bash-in-docker/` if needed. This lets the user run plain `pi` after installing the public package. If the container is Compose-managed, always persist the Compose metadata too:
+   - `composeFile`: path to the Compose file relative to the project root where Pi starts, e.g. `compose.yaml`, `.pi/pi-bash-in-docker/compose.yaml`, or `docker-compose.devcontainer.yml`.
+   - `composeService`: the service name that owns the configured container, e.g. `pi-tools` or `app`.
+
+   This removes ambiguity for non-standard Compose filenames and lets `docker_rebuild_restart` and `stopOnLastExit` use the right Compose file/service. Set `stopOnLastExit` to `true` only if the user wants the extension to stop the container/Compose service when the last Pi process using this config quits.
 
 9. Create or update compose if the user wants lifecycle convenience.
    If Docker files are at the project root, a good default compose file is:
@@ -171,7 +178,7 @@ If the user asks for a non-interactive/default setup, choose sensible defaults a
        command: sleep infinity
    ```
 
-   Adjust ports for the project (`5173`, `3000`, `8000`, `8080`, etc.). If there may be multiple projects using this extension concurrently, use a project-specific `container_name`, e.g. `pi-tools-my-project`, and put that same name in `.pi/pi-bash-in-docker/config.json`.
+   Adjust ports for the project (`5173`, `3000`, `8000`, `8080`, etc.). If there may be multiple projects using this extension concurrently, use a project-specific `container_name`, e.g. `pi-tools-my-project`, and put that same name in `.pi/pi-bash-in-docker/config.json`. Also put the Compose file path and service name in that config (`"composeFile": "compose.yaml"` for root Compose, `"composeFile": ".pi/pi-bash-in-docker/compose.yaml"` for extension-local Compose, or the existing filename such as `"docker-compose.devcontainer.yml"`; `"composeService": "pi-tools"` or the actual service name).
 
 10. If host Git/SSH identity sharing is enabled, add the optional compose settings below.
 
@@ -196,11 +203,27 @@ environment:
   SSH_AUTH_SOCK: /ssh-agent
 volumes:
   - .:/workspace
-  - ${SSH_AUTH_SOCK}:/ssh-agent
+  - /run/host-services/ssh-auth.sock:/ssh-agent
   - ~/.gitconfig:/home/node/.gitconfig:ro
   - ~/.config/git:/home/node/.config/git:ro
   - ~/.ssh/config:/home/node/.ssh/config:ro
   - ~/.ssh/known_hosts:/home/node/.ssh/known_hosts:ro
+```
+
+On macOS Docker Desktop, prefer `/run/host-services/ssh-auth.sock:/ssh-agent`; it is Docker Desktop's supported bridge to the host SSH agent. On Linux or other Docker setups, use the platform-appropriate agent socket mount, often `${SSH_AUTH_SOCK}:/ssh-agent` when that path is visible to Docker.
+
+Also add matching exec settings to `.pi/pi-bash-in-docker/config.json`:
+
+```json
+{
+  "container": "pi-tools-my-project",
+  "containerCwd": "/workspace",
+  "shell": "sh",
+  "user": "node",
+  "env": ["SSH_AUTH_SOCK=/ssh-agent"],
+  "check": true,
+  "autoStart": true
+}
 ```
 
 Adjust `/home/node` for the runtime user:
@@ -211,12 +234,13 @@ Adjust `/home/node` for the runtime user:
 Do **not** mount all of `~/.ssh` by default, even read-only, because it often contains private keys. If the user explicitly requests full SSH directory mounting, warn them first and prefer agent forwarding instead.
 
 Host prerequisites:
-- `SSH_AUTH_SOCK` must be set in the environment used to run `docker compose up`.
+- For the macOS Docker Desktop `/run/host-services/ssh-auth.sock` mount, Docker Desktop must have access to the host SSH agent.
+- For `${SSH_AUTH_SOCK}:/ssh-agent` style mounts, `SSH_AUTH_SOCK` must be set in the environment used to run `docker compose up` and the path must be mountable by Docker.
 - The host SSH agent should have the desired key loaded:
   ```bash
   ssh-add -l
   ```
-- On macOS, the agent socket is commonly under `/private/tmp/.../Listeners` and can be bind-mounted by Docker Desktop.
+- On macOS, avoid relying on the host `/private/tmp/.../Listeners` socket path when Docker Desktop's `/run/host-services/ssh-auth.sock` is available.
 
 Verification commands inside the container:
 

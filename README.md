@@ -97,13 +97,21 @@ Create `.pi/pi-bash-in-docker/config.json` in a project to make flags optional:
   "shell": "sh",
   "check": true,
   "autoStart": true,
-  "stopOnLastExit": false
+  "stopOnLastExit": false,
+  "composeFile": ".pi/pi-bash-in-docker/compose.yaml",
+  "composeService": "pi-tools"
 }
 ```
 
+`user` is optional and is passed to `docker exec --user`/`-u`. It accepts the same values Docker accepts, such as `node`, `1000`, `1000:1000`, or `node:node`. Set it when your devcontainer mounts Git/SSH config, caches, or generated files for a non-root user.
+
+`env` is optional and is passed to `docker exec -e`. Use it for execution-time variables such as `SSH_AUTH_SOCK=/ssh-agent` when the container was created with a matching socket mount.
+
 `autoStart: true` lets the extension start an existing stopped container on Pi startup. If the container does not exist, create it with `docker run` or Compose first.
 
-`stopOnLastExit: true` makes the extension record active Pi process IDs in `.pi/pi-bash-in-docker/processes.json`. On Pi quit, it removes the current PID, prunes stale PIDs, and if no other live Pi process is using the same project config, it stops the Compose service (`docker compose stop <service>`) when a Compose file is available, otherwise it falls back to `docker stop <container>`.
+`composeFile` and `composeService` are optional but recommended for Compose-managed containers, especially when the file has a non-standard name such as `docker-compose.devcontainer.yml`. `composeFile` is resolved relative to the project root where Pi is started. The rebuild/restart tool and `stopOnLastExit` use these values instead of guessing.
+
+`stopOnLastExit: true` makes the extension record active Pi process IDs in `.pi/pi-bash-in-docker/processes.json`. On Pi quit, it removes the current PID, prunes stale PIDs, and if no other live Pi process is using the same project config, it stops the Compose service (`docker compose stop <service>`) when a Compose file is configured or discoverable, otherwise it falls back to `docker stop <container>`.
 
 ## Flags
 
@@ -123,6 +131,52 @@ Flags override project config:
 
 Environment variable equivalents: `PI_DOCKER_CONTAINER`, `PI_DOCKER_CWD`, `PI_DOCKER_LOCAL_CWD`, `PI_DOCKER_SHELL`, `PI_DOCKER_USER`, `PI_DOCKER_ENV`, `PI_DOCKER_CHECK`, `PI_DOCKER_AUTO_START`, `PI_DOCKER_STOP_ON_LAST_EXIT`.
 
+## SSH Agent Forwarding
+
+The extension can pass `SSH_AUTH_SOCK` into `docker exec`, but it cannot add mounts to an already-created container. Configure the socket mount in Docker Compose or when creating the container.
+
+On macOS Docker Desktop, prefer Docker's host-service SSH agent socket instead of bind-mounting the host `$SSH_AUTH_SOCK` path directly:
+
+```yaml
+services:
+  pi-tools:
+    volumes:
+      - .:/workspace
+      - /run/host-services/ssh-auth.sock:/ssh-agent
+      - ~/.gitconfig:/home/node/.gitconfig:ro
+      - ~/.config/git:/home/node/.config/git:ro
+      - ~/.ssh/config:/home/node/.ssh/config:ro
+      - ~/.ssh/known_hosts:/home/node/.ssh/known_hosts:ro
+    environment:
+      SSH_AUTH_SOCK: /ssh-agent
+```
+
+Then align Pi's Docker exec user and env with the container setup:
+
+```json
+{
+  "container": "pi-tools",
+  "containerCwd": "/workspace",
+  "shell": "sh",
+  "user": "node",
+  "env": ["SSH_AUTH_SOCK=/ssh-agent"],
+  "check": true,
+  "autoStart": true
+}
+```
+
+Verify inside Pi with `/docker-doctor` or:
+
+```bash
+!whoami
+!echo $HOME
+!echo $SSH_AUTH_SOCK
+!ssh-add -l
+!ssh -T git@github.com
+```
+
+Adjust `/home/node` and `user` for your image's runtime user. Do not mount all of `~/.ssh` by default; agent forwarding avoids copying private keys, though trusted container processes can still authenticate through the mounted agent while it is available.
+
 ## Agent Tools
 
 The extension overrides Pi's built-in `bash` tool so bash commands run through `docker exec` when Docker bash is enabled.
@@ -133,7 +187,7 @@ It also registers:
 docker_rebuild_restart
 ```
 
-`docker_rebuild_restart` runs from the host Pi process, not from inside the Docker-routed bash tool. Use it after changing a Dockerfile or Compose setup when the image must be rebuilt and the configured container recreated. It looks for Compose files at the project root and under `.pi/pi-bash-in-docker/`, then runs the host equivalent of:
+`docker_rebuild_restart` runs from the host Pi process, not from inside the Docker-routed bash tool. Use it after changing a Dockerfile or Compose setup when the image must be rebuilt and the configured container recreated. It uses `composeFile`/`composeService` from `.pi/pi-bash-in-docker/config.json` when present, otherwise it looks for conventional Compose files at the project root and under `.pi/pi-bash-in-docker/`, then runs the host equivalent of:
 
 ```bash
 docker compose build <service>

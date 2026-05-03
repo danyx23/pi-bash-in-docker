@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { createBashTool, createLocalBashOperations, type BashOperations } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
@@ -22,6 +22,8 @@ type RuntimeConfig = DockerConfig & {
 	check: boolean;
 	stopOnLastExit: boolean;
 	lifecycleDir?: string;
+	composeFile?: string;
+	composeService?: string;
 };
 
 type ProjectConfig = {
@@ -37,6 +39,8 @@ type ProjectConfig = {
 	check?: boolean;
 	autoStart?: boolean;
 	stopOnLastExit?: boolean;
+	composeFile?: string;
+	composeService?: string;
 };
 
 type ExecResult = {
@@ -46,6 +50,12 @@ type ExecResult = {
 };
 
 type ContainerState = "running" | "stopped" | "missing" | "unknown";
+
+type ComposeTarget = {
+	cwd: string;
+	argsPrefix: string[];
+	display: string;
+};
 
 const DEFAULT_CONTAINER = "pi-tools";
 const DEFAULT_CONTAINER_CWD = "/workspace";
@@ -266,7 +276,7 @@ async function inspectRunning(container: string): Promise<boolean> {
 async function assertContainerReady(config: DockerConfig): Promise<void> {
 	const running = await inspectRunning(config.container);
 	if (!running) throw new Error(`Container is not running: ${config.container}`);
-	const result = await docker(["exec", config.container, "test", "-d", config.containerCwd], { timeoutMs: 5_000 });
+	const result = await docker(dockerExecArgs(config, config.localCwd, `test -d ${shellQuote(config.containerCwd)}`), { timeoutMs: 5_000 });
 	if (result.exitCode !== 0) {
 		throw new Error(`Container cwd does not exist or is not a directory: ${config.containerCwd}`);
 	}
@@ -299,21 +309,34 @@ function loadConfig(pi: ExtensionAPI, defaultLocalCwd: string): RuntimeConfig | 
 		check: flagBoolean(pi, "docker-check") || asBoolean(projectConfig.check) || envBoolean("PI_DOCKER_CHECK"),
 		stopOnLastExit: flagBoolean(pi, "docker-stop-on-last-exit") || asBoolean(projectConfig.stopOnLastExit) || envBoolean("PI_DOCKER_STOP_ON_LAST_EXIT"),
 		lifecycleDir: project ? join(defaultLocalCwd, dirname(project.path)) : undefined,
+		composeFile: projectConfig.composeFile?.trim() || undefined,
+		composeService: projectConfig.composeService?.trim() || undefined,
 	};
 }
 
 function configSummary(config: DockerConfig): string {
-	return `${config.container}:${config.containerCwd}`;
+	return `${config.container}:${config.containerCwd}${config.user ? ` user=${config.user}` : ""}`;
 }
 
 function sourceLabel(config: RuntimeConfig): string {
 	return `${config.source} config`;
 }
 
-function findComposeDir(localCwd: string): string | undefined {
-	if (COMPOSE_FILES.some((file) => existsSync(join(localCwd, file)))) return localCwd;
+function resolveComposeTarget(localCwd: string, config?: Pick<RuntimeConfig, "composeFile">): ComposeTarget | undefined {
+	const configuredFile = config?.composeFile?.trim();
+	if (configuredFile) {
+		const filePath = isAbsolute(configuredFile) ? configuredFile : join(localCwd, configuredFile);
+		if (!existsSync(filePath)) return undefined;
+		return { cwd: localCwd, argsPrefix: ["compose", "-f", filePath], display: filePath };
+	}
+
+	if (COMPOSE_FILES.some((file) => existsSync(join(localCwd, file)))) {
+		return { cwd: localCwd, argsPrefix: ["compose"], display: localCwd };
+	}
 	const projectDockerDir = join(localCwd, PROJECT_DOCKER_DIR);
-	if (COMPOSE_FILES.some((file) => existsSync(join(projectDockerDir, file)))) return projectDockerDir;
+	if (COMPOSE_FILES.some((file) => existsSync(join(projectDockerDir, file)))) {
+		return { cwd: projectDockerDir, argsPrefix: ["compose"], display: projectDockerDir };
+	}
 	return undefined;
 }
 
@@ -419,10 +442,10 @@ function setBashStatus(ctx: ExtensionContext, candidate: RuntimeConfig | undefin
 	ctx.ui.setStatus("docker", `${host} ${theme.fg(color, `(docker ${dockerState})`)}`);
 }
 
-async function inferComposeService(localCwd: string, requestedService?: string): Promise<string> {
+async function inferComposeService(target: ComposeTarget, requestedService?: string): Promise<string> {
 	if (requestedService?.trim()) return requestedService.trim();
 
-	const servicesResult = await docker(["compose", "config", "--services"], { cwd: localCwd, timeoutMs: 30_000 });
+	const servicesResult = await docker([...target.argsPrefix, "config", "--services"], { cwd: target.cwd, timeoutMs: 30_000 });
 	if (servicesResult.exitCode !== 0) throw new Error(servicesResult.stderr.trim() || "Failed to list docker compose services");
 
 	const services = servicesResult.stdout
@@ -525,11 +548,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function stopContainerAfterLastExit(lifecycleConfig: RuntimeConfig): Promise<void> {
-		const composeDir = findComposeDir(lifecycleConfig.localCwd);
-		if (composeDir) {
+		const composeTarget = resolveComposeTarget(lifecycleConfig.localCwd, lifecycleConfig);
+		if (composeTarget) {
 			try {
-				const service = await inferComposeService(composeDir);
-				const result = await docker(["compose", "stop", service], { cwd: composeDir, timeoutMs: 30_000 });
+				const service = await inferComposeService(composeTarget, lifecycleConfig.composeService);
+				const result = await docker([...composeTarget.argsPrefix, "stop", service], { cwd: composeTarget.cwd, timeoutMs: 30_000 });
 				if (result.exitCode === 0) return;
 			} catch {
 				// Fall back to stopping the configured container by name below.
@@ -576,7 +599,7 @@ export default function (pi: ExtensionAPI) {
 			"Ask the user before using docker_rebuild_restart unless they explicitly requested a rebuild/restart of the Docker container.",
 		],
 		parameters: Type.Object({
-			service: Type.Optional(Type.String({ description: "Docker Compose service to rebuild/recreate. Defaults to pi-tools when present, or the only compose service." })),
+			service: Type.Optional(Type.String({ description: "Docker Compose service to rebuild/recreate. Defaults to config composeService, then pi-tools when present, or the only compose service." })),
 			noCache: Type.Optional(Type.Boolean({ description: "Run docker compose build with --no-cache before recreating the service." })),
 			timeoutSeconds: Type.Optional(Type.Number({ description: "Timeout for each docker compose step in seconds. Defaults to 600." })),
 		}),
@@ -586,22 +609,24 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const localCwd = ctx.cwd;
-			const composeDir = findComposeDir(localCwd);
-			if (!composeDir) {
-				throw new Error(`No compose.yaml/compose.yml/docker-compose.yaml/docker-compose.yml found in the Pi project cwd or ${PROJECT_DOCKER_DIR}; cannot safely recreate the container from image metadata alone.`);
-			}
-
-			const service = await inferComposeService(composeDir, params.service);
-			const timeoutMs = Math.max(1, params.timeoutSeconds ?? 600) * 1000;
 			const current = loadConfig(pi, localCwd);
 			if (!current) {
 				throw new Error(`Docker bash mode is not configured. Start Pi with --docker-container <name>, set PI_DOCKER_CONTAINER, or add ${PROJECT_CONFIG_PATH}.`);
 			}
+
+			const composeTarget = resolveComposeTarget(localCwd, current);
+			if (!composeTarget) {
+				const configured = current.composeFile ? ` configured composeFile '${current.composeFile}'` : ` compose.yaml/compose.yml/docker-compose.yaml/docker-compose.yml in the Pi project cwd or ${PROJECT_DOCKER_DIR}`;
+				throw new Error(`No Docker Compose file found (${configured}); cannot safely recreate the container from image metadata alone.`);
+			}
+
+			const service = await inferComposeService(composeTarget, params.service ?? current.composeService);
+			const timeoutMs = Math.max(1, params.timeoutSeconds ?? 600) * 1000;
 			ensureBashOverrideRegistered();
 			const steps: string[] = [];
 			const append = (text: string) => {
 				steps.push(text);
-				onUpdate?.({ content: [{ type: "text", text: steps.join("\n\n") }], details: { steps: [...steps], service, container: current.container } });
+				onUpdate?.({ content: [{ type: "text", text: steps.join("\n\n") }], details: { steps: [...steps], service, container: current.container, compose: composeTarget.display } });
 			};
 
 			const ok = await ctx.ui.confirm(
@@ -612,15 +637,15 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: "Cancelled Docker rebuild/recreate." }], details: { cancelled: true, service, container: current.container } };
 			}
 
-			const buildArgs = ["compose", "build", ...(params.noCache ? ["--no-cache"] : []), service];
-			append(`Starting ${formatDockerCommand(buildArgs)} in ${composeDir}`);
-			const build = await docker(buildArgs, { cwd: composeDir, timeoutMs, signal });
+			const buildArgs = [...composeTarget.argsPrefix, "build", ...(params.noCache ? ["--no-cache"] : []), service];
+			append(`Starting ${formatDockerCommand(buildArgs)} in ${composeTarget.display}`);
+			const build = await docker(buildArgs, { cwd: composeTarget.cwd, timeoutMs, signal });
 			append(summarizeStep("build", buildArgs, build));
 			if (build.exitCode !== 0) throw new Error(`Docker compose build failed for service '${service}'`);
 
-			const upArgs = ["compose", "up", "-d", "--force-recreate", service];
-			append(`Starting ${formatDockerCommand(upArgs)} in ${composeDir}`);
-			const up = await docker(upArgs, { cwd: composeDir, timeoutMs, signal });
+			const upArgs = [...composeTarget.argsPrefix, "up", "-d", "--force-recreate", service];
+			append(`Starting ${formatDockerCommand(upArgs)} in ${composeTarget.display}`);
+			const up = await docker(upArgs, { cwd: composeTarget.cwd, timeoutMs, signal });
 			append(summarizeStep("up", upArgs, up));
 			if (up.exitCode !== 0) throw new Error(`Docker compose up failed for service '${service}'`);
 
@@ -629,7 +654,7 @@ export default function (pi: ExtensionAPI) {
 				await assertContainerReady(current);
 				config = current;
 				setBashStatus(ctx, current, "running", true);
-				const check = await docker(["exec", "-w", current.containerCwd, current.container, current.shell, "-lc", "pwd && id && uname -s"], { timeoutMs: 10_000 });
+				const check = await docker(dockerExecArgs(current, current.localCwd, "pwd && id && whoami && echo HOME=$HOME && uname -s"), { timeoutMs: 10_000 });
 				verification = check.stdout.trim();
 				append(`Verification for ${configSummary(current)}:\n${verification}`);
 			} catch (error) {
@@ -644,7 +669,7 @@ export default function (pi: ExtensionAPI) {
 						text: `Rebuilt and recreated Docker Compose service '${service}' from host Pi process.\n\n${steps.join("\n\n")}`,
 					},
 				],
-				details: { service, container: current.container, steps, verification },
+				details: { service, container: current.container, compose: composeTarget.display, steps, verification },
 			};
 		},
 	});
@@ -684,7 +709,7 @@ export default function (pi: ExtensionAPI) {
 		return {
 			systemPrompt:
 				event.systemPrompt +
-				`\n\nDocker bash mode is enabled. The bash tool and user ! commands run inside Docker container ${JSON.stringify(config.container)} with container cwd ${JSON.stringify(config.containerCwd)}. File tools such as read, edit, and write operate on the host filesystem rooted at ${JSON.stringify(config.localCwd)}, which should be bind-mounted into the container at ${JSON.stringify(config.containerCwd)}. Prefer commands that work inside the container. For long-running servers, start them in the background with nohup/setsid and redirect stdin/stdout/stderr, then inspect logs in later bash calls.`,
+				`\n\nDocker bash mode is enabled. The bash tool and user ! commands run inside Docker container ${JSON.stringify(config.container)} with container cwd ${JSON.stringify(config.containerCwd)}${config.user ? ` as user ${JSON.stringify(config.user)}` : " using the container default user"}. File tools such as read, edit, and write operate on the host filesystem rooted at ${JSON.stringify(config.localCwd)}, which should be bind-mounted into the container at ${JSON.stringify(config.containerCwd)}. Prefer commands that work inside the container. For long-running servers, start them in the background with nohup/setsid and redirect stdin/stdout/stderr, then inspect logs in later bash calls.`,
 		};
 	});
 
@@ -700,7 +725,8 @@ export default function (pi: ExtensionAPI) {
 			const result = await docker(["inspect", "-f", "name={{.Name}} running={{.State.Running}} image={{.Config.Image}}", current.container], { timeoutMs: 5_000 });
 			if (!ctx.hasUI) return;
 			const route = config ? "bash=docker" : "bash=host";
-			if (result.exitCode === 0) ctx.ui.notify(`${result.stdout.trim().replace(/^name=\//, "name=")} ${route} source=${sourceLabel(current)}`, "info");
+			const user = current.user ? ` user=${current.user}` : " user=<container default>";
+			if (result.exitCode === 0) ctx.ui.notify(`${result.stdout.trim().replace(/^name=\//, "name=")} ${route}${user} source=${sourceLabel(current)}`, "info");
 			else ctx.ui.notify(`${result.stderr.trim() || `Container not found: ${current.container}`} ${route}`, "error");
 		},
 	});
@@ -788,9 +814,19 @@ export default function (pi: ExtensionAPI) {
 			}
 			try {
 				await assertContainerReady(current);
-				const pwd = await docker(["exec", "-w", current.containerCwd, current.container, current.shell, "-lc", "pwd && id && uname -a"], { timeoutMs: 10_000 });
+				const diagnosticCommand = [
+					"pwd",
+					"id",
+					"whoami",
+					"echo HOME=$HOME",
+					"echo SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-}",
+					"uname -a",
+					"if command -v ssh-add >/dev/null 2>&1; then ssh-add -l || true; else echo 'ssh-add: not installed'; fi",
+				].join(" && ");
+				const pwd = await docker(dockerExecArgs(current, current.localCwd, diagnosticCommand), { timeoutMs: 10_000 });
 				if (pwd.exitCode !== 0) throw new Error(pwd.stderr.trim() || "docker exec check failed");
-				if (ctx.hasUI) ctx.ui.notify(`Docker bash OK: ${configSummary(current)} (${sourceLabel(current)})\n${pwd.stdout.trim()}`, "info");
+				const output = [pwd.stdout.trim(), pwd.stderr.trim()].filter(Boolean).join("\n");
+				if (ctx.hasUI) ctx.ui.notify(`Docker bash OK: ${configSummary(current)} (${sourceLabel(current)})\n${output}`, "info");
 			} catch (error) {
 				if (ctx.hasUI) ctx.ui.notify(`Docker doctor failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}

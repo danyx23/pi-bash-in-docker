@@ -26,6 +26,8 @@ Recommended project config:
 }
 ```
 
+If the container is designed for a non-root dev user, add `"user": "node"` (or another Docker `--user` value such as `1000:1000`) so Pi executes with `docker exec -u` as that user. If SSH agent forwarding is mounted at `/ssh-agent`, also add `"env": ["SSH_AUTH_SOCK=/ssh-agent"]`.
+
 With that config, run:
 
 ```bash
@@ -167,6 +169,10 @@ services:
     working_dir: /workspace
     volumes:
       - .:/workspace
+      # macOS Docker Desktop SSH agent forwarding, optional:
+      # - /run/host-services/ssh-auth.sock:/ssh-agent
+    # environment:
+    #   SSH_AUTH_SOCK: /ssh-agent
     ports:
       - "3000:3000"
     security_opt:
@@ -186,7 +192,7 @@ Find the actual container name/id:
 docker compose ps -q pi-tools
 ```
 
-Then create `.pi/pi-bash-in-docker/config.json` as shown above and start Pi normally:
+Then create `.pi/pi-bash-in-docker/config.json` as shown above and start Pi normally. For Compose-managed containers, also include `"composeFile": "compose.yaml"` (or the actual path, such as `"docker-compose.devcontainer.yml"`) and `"composeService": "pi-tools"` (or the actual service). If using a non-root image user or SSH agent forwarding, include matching `user` and `env` entries in that config.
 
 ```bash
 pi
@@ -220,6 +226,7 @@ Expected:
 
 - `pwd` should be `/workspace` or a subdirectory under it.
 - `uname -a` should report Linux.
+- `id`/`whoami` should show the configured `user` when one is set.
 - files should match the host project checkout because it is bind-mounted.
 
 If `uname -s` or `uname -a` reports Darwin/macOS, the command is not running through the extension-routed Pi bash tool. Common causes:
@@ -302,10 +309,16 @@ Container cwd missing:
 docker exec pi-tools test -d /workspace
 ```
 
-Docker exec check:
+Docker exec check (add `-u node` when `.pi/pi-bash-in-docker/config.json` sets `"user": "node"`):
 
 ```bash
-docker exec -i -w /workspace pi-tools sh -lc 'pwd && id && uname -a'
+docker exec -i -w /workspace pi-tools sh -lc 'pwd && id && whoami && echo $HOME && uname -a'
+```
+
+SSH agent check when mounted:
+
+```bash
+docker exec -i -u node -w /workspace -e SSH_AUTH_SOCK=/ssh-agent pi-tools sh -lc 'echo $SSH_AUTH_SOCK && ssh-add -l && ssh -T git@github.com'
 ```
 
 Port not reachable from host:
