@@ -18,7 +18,7 @@ Then start Pi normally from a project that has Docker bash configured:
 pi
 ```
 
-The extension enables Docker routing at Pi session startup only when Docker mode is explicitly configured. If you create `.pi/bash-in-docker.json`, create/start the container, or change Docker settings inside an already-running Pi session, start a new Pi session or use `/docker-start` before expecting `bash` tool calls and `!` commands to route into Docker.
+The extension enables Docker routing at Pi session startup only when Docker mode is explicitly configured. If you create `.pi/pi-bash-in-docker/config.json`, create/start the container, or change Docker settings inside an already-running Pi session, start a new Pi session or use `/docker-start` before expecting `bash` tool calls and `!` commands to route into Docker.
 
 ## How Activation Works
 
@@ -27,7 +27,8 @@ The extension stays inert by default so it can coexist with other extensions tha
 It activates only when one of these explicit configuration sources exists:
 
 1. `--docker-container <name-or-id>` CLI flag;
-2. project config at `.pi/bash-in-docker.json` or `.pi/docker-bash.json`;
+2. project config at `.pi/pi-bash-in-docker/config.json`;
+   - legacy `.pi/bash-in-docker.json` and `.pi/docker-bash.json` files are still read for compatibility;
 3. `PI_DOCKER_CONTAINER` environment variable.
 
 With project config, plain `pi` is enough. Without one of those activation sources, the extension does not override Pi's built-in `bash` tool.
@@ -40,7 +41,7 @@ Inside Pi, use the included setup skill:
 /skill:docker-init
 ```
 
-It can create or improve a project `Dockerfile`, `.dockerignore`, Compose setup, and `.pi/bash-in-docker.json` so future sessions work without flags.
+It can create or improve Dockerfile, `.dockerignore`, Compose setup, and `.pi/pi-bash-in-docker/config.json` so future sessions work without flags. The setup skill can place the Docker files either at the project root or under `.pi/pi-bash-in-docker/` for easy gitignore/local-dev isolation.
 
 ## Verify Activation
 
@@ -63,8 +64,8 @@ Linux
 
 If `uname -s` returns `Darwin`, that command is running on macOS, not in the Docker-routed Pi bash tool. Common causes:
 
-- Pi was started before `.pi/bash-in-docker.json` existed or before the container was running;
-- Pi was started from a different directory than the project root containing `.pi/bash-in-docker.json`;
+- Pi was started before `.pi/pi-bash-in-docker/config.json` existed or before the container was running;
+- Pi was started from a different directory than the project root containing `.pi/pi-bash-in-docker/config.json`;
 - the command was run in an external terminal/API harness instead of Pi's `bash` tool or user `!` command;
 - the package was not installed/enabled, or Pi was started with `--no-extensions`.
 
@@ -87,7 +88,7 @@ docker run -d \
 
 ## Project Config
 
-Create `.pi/bash-in-docker.json` in a project to make flags optional:
+Create `.pi/pi-bash-in-docker/config.json` in a project to make flags optional:
 
 ```json
 {
@@ -128,7 +129,7 @@ It also registers:
 docker_rebuild_restart
 ```
 
-`docker_rebuild_restart` runs from the host Pi process, not from inside the Docker-routed bash tool. Use it after changing a Dockerfile or Compose setup when the image must be rebuilt and the configured container recreated. It requires a Compose file and runs the host equivalent of:
+`docker_rebuild_restart` runs from the host Pi process, not from inside the Docker-routed bash tool. Use it after changing a Dockerfile or Compose setup when the image must be rebuilt and the configured container recreated. It looks for Compose files at the project root and under `.pi/pi-bash-in-docker/`, then runs the host equivalent of:
 
 ```bash
 docker compose build <service>

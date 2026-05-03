@@ -20,15 +20,20 @@ Recommended questions:
 1. **Container lifecycle** — “Should I add a Compose file so the Pi Docker container can be started with `docker compose up -d`?”
    - Default recommendation: yes.
 
-2. **Container name** — “Use project-specific container name `<suggested>` to avoid conflicts with other projects?”
-   - Default recommendation: yes.
-   - Use the same name in compose and `.pi/bash-in-docker.json`.
+2. **Generated Docker file location** — “Should I put the Dockerfile/Compose/Docker ignore files under `.pi/pi-bash-in-docker/` or at the project root?”
+   - Default recommendation: `.pi/pi-bash-in-docker/` when these files are only for this extension/dev workflow, because the whole folder is easy to ignore.
+   - Recommend project root when the repo can use the Dockerfile/Compose files independently of this extension or wants to share them with the team/CI.
+   - Always put the extension config itself at `.pi/pi-bash-in-docker/config.json`.
 
-3. **Ports** — “Which dev server ports should be published?”
+3. **Container name** — “Use project-specific container name `<suggested>` to avoid conflicts with other projects?”
+   - Default recommendation: yes.
+   - Use the same name in compose and `.pi/pi-bash-in-docker/config.json`.
+
+4. **Ports** — “Which dev server ports should be published?”
    - Infer likely ports from README/package scripts/framework when possible.
    - Common defaults: Vite `5173`, Node/Next `3000`, Python web `8000`, JVM `8080`.
 
-4. **Host Git/SSH identity sharing** — “Do you want to share your host Git config and SSH agent with the container so `git push` and GitHub SSH auth work inside Docker?”
+5. **Host Git/SSH identity sharing** — “Do you want to share your host Git config and SSH agent with the container so `git push` and GitHub SSH auth work inside Docker?”
    - Default recommendation: opt in for trusted personal dev containers; opt out for untrusted repos.
    - Explain the tradeoff briefly:
      - SSH agent forwarding does not copy private keys into the container.
@@ -36,7 +41,7 @@ Recommended questions:
      - Git and SSH config should be mounted read-only.
    - If the user says yes, add the compose mounts/environment described in [Optional Host Git/SSH Identity Sharing](#optional-host-gitssh-identity-sharing).
 
-5. **Extra tools** — “Any extra CLIs you want baked into the image now?”
+6. **Extra tools** — “Any extra CLIs you want baked into the image now?”
    - If the user names tools, install them persistently in the Dockerfile.
    - For later missing tools, use the `docker-tool-install` skill.
 
@@ -46,8 +51,8 @@ If the user asks for a non-interactive/default setup, choose sensible defaults a
 
 1. Inspect the project before writing files.
    - Read `package.json`, lockfiles, `pyproject.toml`, `requirements*.txt`, `go.mod`, `Cargo.toml`, `Gemfile`, `pom.xml`, `build.gradle`, etc. as applicable.
-   - Check whether `Dockerfile`, `.dockerignore`, `compose.yaml`, `docker-compose.yml`, or `compose.*.yaml` already exist.
-   - Check `.pi/bash-in-docker.json` or `.pi/docker-bash.json`.
+   - Check whether `Dockerfile`, `.dockerignore`, `compose.yaml`, `docker-compose.yml`, `compose.*.yaml`, or `.pi/pi-bash-in-docker/` Docker files already exist.
+   - Check `.pi/pi-bash-in-docker/config.json` and legacy `.pi/bash-in-docker.json` or `.pi/docker-bash.json`.
    - Do not overwrite an existing Dockerfile or compose file without showing the user the intended changes.
 
 2. Choose a base image appropriate for the project.
@@ -87,7 +92,9 @@ If the user asks for a non-interactive/default setup, choose sensible defaults a
    - Recommend `--init` or `init: true`.
    - The extension will use `docker exec -i -w /workspace <container> sh -lc '<command>'`.
 
-7. Create `.dockerignore`.
+7. Create the Docker build ignore file for the chosen Docker file location.
+   - If Docker files live at the project root, create/update root `.dockerignore`.
+   - If Docker files live under `.pi/pi-bash-in-docker/`, prefer `.pi/pi-bash-in-docker/Dockerfile.dockerignore` next to that Dockerfile. Because the build context should still be the repo root (`../..` from that folder), the ignore patterns still apply to repo-root paths while keeping extension-dev Docker files easy to ignore.
    Include common heavy/sensitive directories:
    ```text
    .git
@@ -108,7 +115,7 @@ If the user asks for a non-interactive/default setup, choose sensible defaults a
    Adjust based on project type. Do not ignore lockfiles.
 
 8. Create project config so the extension works without flags after installation.
-   Recommended file: `.pi/bash-in-docker.json`
+   Recommended file: `.pi/pi-bash-in-docker/config.json`
    ```json
    {
      "container": "pi-tools-my-project",
@@ -118,10 +125,10 @@ If the user asks for a non-interactive/default setup, choose sensible defaults a
      "autoStart": true
    }
    ```
-   Create `.pi/` if needed. This lets the user run plain `pi` after installing the public package.
+   Create `.pi/pi-bash-in-docker/` if needed. This lets the user run plain `pi` after installing the public package.
 
 9. Create or update compose if the user wants lifecycle convenience.
-   A good default compose file for this extension:
+   If Docker files are at the project root, a good default compose file is:
    ```yaml
    services:
      pi-tools:
@@ -141,7 +148,29 @@ If the user asks for a non-interactive/default setup, choose sensible defaults a
          - no-new-privileges:true
        command: sleep infinity
    ```
-   Adjust ports for the project (`5173`, `3000`, `8000`, `8080`, etc.). If there may be multiple projects using this extension concurrently, use a project-specific `container_name`, e.g. `pi-tools-my-project`, and put that same name in `.pi/bash-in-docker.json`.
+
+   If Docker files are under `.pi/pi-bash-in-docker/`, put compose there and use repo-root-relative paths from that folder:
+   ```yaml
+   services:
+     pi-tools:
+       build:
+         context: ../..
+         dockerfile: .pi/pi-bash-in-docker/Dockerfile
+       container_name: pi-tools-my-project
+       init: true
+       stdin_open: true
+       tty: true
+       working_dir: /workspace
+       volumes:
+         - ../..:/workspace
+       ports:
+         - "3000:3000"
+       security_opt:
+         - no-new-privileges:true
+       command: sleep infinity
+   ```
+
+   Adjust ports for the project (`5173`, `3000`, `8000`, `8080`, etc.). If there may be multiple projects using this extension concurrently, use a project-specific `container_name`, e.g. `pi-tools-my-project`, and put that same name in `.pi/pi-bash-in-docker/config.json`.
 
 10. If host Git/SSH identity sharing is enabled, add the optional compose settings below.
 
@@ -159,7 +188,7 @@ Security note to tell the user:
 
 > This shares your host SSH agent with the container. It does not copy private keys, but processes in the container can use the agent socket to authenticate while the container is running. Only enable this for trusted project containers.
 
-Compose additions for an image whose runtime user is `node`:
+Compose additions for an image whose runtime user is `node` (keep the existing workspace bind mount; use `.:/workspace` for root compose or `../..:/workspace` for `.pi/pi-bash-in-docker/compose.yaml`):
 
 ```yaml
 environment:
@@ -297,6 +326,7 @@ After creating or modifying files, summarize:
 - files created/changed;
 - image build command;
 - container start command;
-- `.pi/bash-in-docker.json` contents if created;
+- Docker file location chosen (`.pi/pi-bash-in-docker/` or project root);
+- `.pi/pi-bash-in-docker/config.json` contents if created;
 - exact Pi command to use after installation. Prefer plain `pi` when project config was created; otherwise include necessary flags;
 - verification commands for Docker routing and, if enabled, Git/SSH identity sharing.

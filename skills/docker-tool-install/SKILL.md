@@ -30,9 +30,9 @@ Only edit the Dockerfile after the user agrees. If the user asks directly to ins
    - If bash is routed through Docker, `uname -s` should report `Linux` and `pwd` should be under `/workspace`.
 
 2. Inspect project container files before editing.
-   - Read `Dockerfile`.
-   - Check for `compose.yaml`, `docker-compose.yml`, or `compose.*.yaml`.
-   - Read `.pi/bash-in-docker.json` to identify the configured container name when present.
+   - Read `Dockerfile` or `.pi/pi-bash-in-docker/Dockerfile`, depending on where this project keeps the pi-bash-in-docker dev container files.
+   - Check for `compose.yaml`, `docker-compose.yml`, `compose.*.yaml`, and compose files under `.pi/pi-bash-in-docker/`.
+   - Read `.pi/pi-bash-in-docker/config.json` to identify the configured container name when present.
 
 3. Determine how to install the tool.
    - Debian/Ubuntu images: prefer `apt-get install -y --no-install-recommends <package>`.
@@ -49,10 +49,10 @@ Only edit the Dockerfile after the user agrees. If the user asks directly to ins
    - Keep edits minimal.
    - Add packages to an existing install block when one exists.
    - Preserve lockfiles and project files.
-   - If no Dockerfile exists, use the `docker-init` skill first.
+   - If no Dockerfile exists at the project root or under `.pi/pi-bash-in-docker/`, use the `docker-init` skill first.
 
 6. Rebuild the image and recreate the container.
-   - If the project has a Compose file and the `docker_rebuild_restart` tool is available, prefer that tool. It runs from the host Pi process rather than from the Docker-routed bash tool, so it can access the host Docker daemon even when normal bash commands run inside the container.
+   - If the project has a Compose file at the project root or under `.pi/pi-bash-in-docker/` and the `docker_rebuild_restart` tool is available, prefer that tool. It runs from the host Pi process rather than from the Docker-routed bash tool, so it can access the host Docker daemon even when normal bash commands run inside the container.
    - `docker_rebuild_restart` asks for confirmation and then runs the host equivalent of:
      ```bash
      docker compose build <service>
@@ -81,7 +81,7 @@ Only edit the Dockerfile after the user agrees. If the user asks directly to ins
 
    Use `docker_rebuild_restart` when possible for Compose projects. The extension slash commands run in the Pi host process, but they only start/stop existing containers; they do not rebuild images.
 
-   If a container is configured in `.pi/bash-in-docker.json`, restarting/recreating it may interrupt running processes in that container. The extension should reconnect to the recreated container by name; if it does not, restart Pi or run `/docker-start`.
+   If a container is configured in `.pi/pi-bash-in-docker/config.json`, restarting/recreating it may interrupt running processes in that container. The extension should reconnect to the recreated container by name; if it does not, restart Pi or run `/docker-start`.
 
 8. Verify the tool after rebuild/recreate.
    - In the new container, run:

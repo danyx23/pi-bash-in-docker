@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { createBashTool, createLocalBashOperations, type BashOperations } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 
-type ConfigSource = "flag" | "project" | "env";
+type ConfigSource = "flag" | "project" | "legacy-project" | "env";
 
 type DockerConfig = {
 	container: string;
@@ -47,7 +47,11 @@ type ContainerState = "running" | "stopped" | "missing" | "unknown";
 const DEFAULT_CONTAINER = "pi-tools";
 const DEFAULT_CONTAINER_CWD = "/workspace";
 const DEFAULT_SHELL = "sh";
-const CONFIG_PATHS = [".pi/bash-in-docker.json", ".pi/docker-bash.json"];
+const PROJECT_CONFIG_PATH = ".pi/pi-bash-in-docker/config.json";
+const LEGACY_CONFIG_PATHS = [".pi/bash-in-docker.json", ".pi/docker-bash.json"];
+const CONFIG_PATHS = [PROJECT_CONFIG_PATH, ...LEGACY_CONFIG_PATHS];
+const PROJECT_DOCKER_DIR = ".pi/pi-bash-in-docker";
+const COMPOSE_FILES = ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"];
 
 function flagString(pi: ExtensionAPI, name: string): string | undefined {
 	const value = pi.getFlag(name);
@@ -89,12 +93,16 @@ function parseEnvList(value: string | undefined): string[] {
 		.filter((entry) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(entry));
 }
 
-function loadProjectConfig(localCwd: string): ProjectConfig | undefined {
+function loadProjectConfig(localCwd: string): { config: ProjectConfig; path: string; legacy: boolean } | undefined {
 	for (const relPath of CONFIG_PATHS) {
 		const path = join(localCwd, relPath);
 		if (!existsSync(path)) continue;
 		try {
-			return JSON.parse(readFileSync(path, "utf-8")) as ProjectConfig;
+			return {
+				config: JSON.parse(readFileSync(path, "utf-8")) as ProjectConfig,
+				path: relPath,
+				legacy: LEGACY_CONFIG_PATHS.includes(relPath),
+			};
 		} catch {
 			return undefined;
 		}
@@ -261,7 +269,7 @@ async function assertContainerReady(config: DockerConfig): Promise<void> {
 
 function loadConfig(pi: ExtensionAPI, defaultLocalCwd: string): RuntimeConfig | undefined {
 	const project = loadProjectConfig(defaultLocalCwd);
-	const projectConfig = project ?? {};
+	const projectConfig = project?.config ?? {};
 	const flaggedContainer = flagString(pi, "docker-container");
 	const projectContainer = projectConfig.container ?? projectConfig.containerName;
 	const envContainer = envString("PI_DOCKER_CONTAINER");
@@ -272,7 +280,7 @@ function loadConfig(pi: ExtensionAPI, defaultLocalCwd: string): RuntimeConfig | 
 	if (!flaggedContainer && !project && !envContainer) return undefined;
 
 	const container = pickString(flaggedContainer, projectContainer, envContainer, DEFAULT_CONTAINER)!;
-	const source: ConfigSource = flaggedContainer ? "flag" : project ? "project" : "env";
+	const source: ConfigSource = flaggedContainer ? "flag" : project?.legacy ? "legacy-project" : project ? "project" : "env";
 
 	return {
 		container,
@@ -295,8 +303,11 @@ function sourceLabel(config: RuntimeConfig): string {
 	return `${config.source} config`;
 }
 
-function hasComposeFile(localCwd: string): boolean {
-	return ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"].some((file) => existsSync(join(localCwd, file)));
+function findComposeDir(localCwd: string): string | undefined {
+	if (COMPOSE_FILES.some((file) => existsSync(join(localCwd, file)))) return localCwd;
+	const projectDockerDir = join(localCwd, PROJECT_DOCKER_DIR);
+	if (COMPOSE_FILES.some((file) => existsSync(join(projectDockerDir, file)))) return projectDockerDir;
+	return undefined;
 }
 
 function shellQuote(value: string): string {
@@ -463,15 +474,16 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const localCwd = ctx.cwd;
-			if (!hasComposeFile(localCwd)) {
-				throw new Error("No compose.yaml/compose.yml/docker-compose.yaml/docker-compose.yml found in the Pi project cwd; cannot safely recreate the container from image metadata alone.");
+			const composeDir = findComposeDir(localCwd);
+			if (!composeDir) {
+				throw new Error(`No compose.yaml/compose.yml/docker-compose.yaml/docker-compose.yml found in the Pi project cwd or ${PROJECT_DOCKER_DIR}; cannot safely recreate the container from image metadata alone.`);
 			}
 
-			const service = await inferComposeService(localCwd, params.service);
+			const service = await inferComposeService(composeDir, params.service);
 			const timeoutMs = Math.max(1, params.timeoutSeconds ?? 600) * 1000;
 			const current = loadConfig(pi, localCwd);
 			if (!current) {
-				throw new Error("Docker bash mode is not configured. Start Pi with --docker-container <name>, set PI_DOCKER_CONTAINER, or add .pi/bash-in-docker.json.");
+				throw new Error(`Docker bash mode is not configured. Start Pi with --docker-container <name>, set PI_DOCKER_CONTAINER, or add ${PROJECT_CONFIG_PATH}.`);
 			}
 			ensureBashOverrideRegistered();
 			const steps: string[] = [];
@@ -489,14 +501,14 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const buildArgs = ["compose", "build", ...(params.noCache ? ["--no-cache"] : []), service];
-			append(`Starting ${formatDockerCommand(buildArgs)} in ${localCwd}`);
-			const build = await docker(buildArgs, { cwd: localCwd, timeoutMs, signal });
+			append(`Starting ${formatDockerCommand(buildArgs)} in ${composeDir}`);
+			const build = await docker(buildArgs, { cwd: composeDir, timeoutMs, signal });
 			append(summarizeStep("build", buildArgs, build));
 			if (build.exitCode !== 0) throw new Error(`Docker compose build failed for service '${service}'`);
 
 			const upArgs = ["compose", "up", "-d", "--force-recreate", service];
-			append(`Starting ${formatDockerCommand(upArgs)} in ${localCwd}`);
-			const up = await docker(upArgs, { cwd: localCwd, timeoutMs, signal });
+			append(`Starting ${formatDockerCommand(upArgs)} in ${composeDir}`);
+			const up = await docker(upArgs, { cwd: composeDir, timeoutMs, signal });
 			append(summarizeStep("up", upArgs, up));
 			if (up.exitCode !== 0) throw new Error(`Docker compose up failed for service '${service}'`);
 
@@ -562,7 +574,7 @@ export default function (pi: ExtensionAPI) {
 			await refreshDockerMode(ctx);
 			const current = config ?? loadConfig(pi, ctx.cwd);
 			if (!current) {
-				if (ctx.hasUI) ctx.ui.notify("Docker bash mode is inactive. Start Pi with --docker-container <name>, set PI_DOCKER_CONTAINER, or add .pi/bash-in-docker.json.", "info");
+				if (ctx.hasUI) ctx.ui.notify(`Docker bash mode is inactive. Start Pi with --docker-container <name>, set PI_DOCKER_CONTAINER, or add ${PROJECT_CONFIG_PATH}.`, "info");
 				return;
 			}
 			const result = await docker(["inspect", "-f", "name={{.Name}} running={{.State.Running}} image={{.Config.Image}}", current.container], { timeoutMs: 5_000 });
@@ -645,7 +657,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const current = config ?? loadConfig(pi, ctx.cwd);
 			if (!current) {
-				if (ctx.hasUI) ctx.ui.notify("Docker bash mode is inactive. Start Pi with --docker-container <name>, set PI_DOCKER_CONTAINER, or add .pi/bash-in-docker.json.", "warning");
+				if (ctx.hasUI) ctx.ui.notify(`Docker bash mode is inactive. Start Pi with --docker-container <name>, set PI_DOCKER_CONTAINER, or add ${PROJECT_CONFIG_PATH}.`, "warning");
 				return;
 			}
 			try {

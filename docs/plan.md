@@ -105,7 +105,7 @@ After the package is installed, Docker bash routing should work without extra fl
 Activation/config resolution order:
 
 1. `--docker-container` CLI flag
-2. project config: `.pi/bash-in-docker.json` or `.pi/docker-bash.json`
+2. project config: `.pi/pi-bash-in-docker/config.json`
 3. `PI_DOCKER_CONTAINER` environment variable
 
 Other `PI_DOCKER_*` values tune an active configuration but do not activate Docker mode by themselves.

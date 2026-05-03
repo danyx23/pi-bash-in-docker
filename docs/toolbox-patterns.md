@@ -120,7 +120,7 @@ Potential path:
 or project-local:
 
 ```text
-.pi/docker-bash.json
+.pi/pi-bash-in-docker/config.json
 .pi/docker-bash.env
 ```
 

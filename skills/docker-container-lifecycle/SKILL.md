@@ -11,7 +11,7 @@ This skill assumes Pi itself runs on the host and the `pi-bash-in-docker` extens
 
 ## Extension Basics
 
-If this package is installed, flags are optional when the project has `.pi/bash-in-docker.json` or when a running default container named `pi-tools` exists.
+If this package is installed, flags are optional when the project has `.pi/pi-bash-in-docker/config.json`.
 
 Recommended project config:
 
@@ -91,8 +91,8 @@ docker run -d \
 Create project config so future Pi starts need no flags:
 
 ```bash
-mkdir -p .pi
-cat > .pi/bash-in-docker.json <<'JSON'
+mkdir -p .pi/pi-bash-in-docker
+cat > .pi/pi-bash-in-docker/config.json <<'JSON'
 {
   "container": "pi-tools",
   "containerCwd": "/workspace",
@@ -183,7 +183,7 @@ Find the actual container name/id:
 docker compose ps -q pi-tools
 ```
 
-Then create `.pi/bash-in-docker.json` as shown above and start Pi normally:
+Then create `.pi/pi-bash-in-docker/config.json` as shown above and start Pi normally:
 
 ```bash
 pi
@@ -221,8 +221,8 @@ Expected:
 
 If `uname -s` or `uname -a` reports Darwin/macOS, the command is not running through the extension-routed Pi bash tool. Common causes:
 
-- Pi was started before `.pi/bash-in-docker.json` existed or before the container was running;
-- Pi was started from a directory that does not contain the project's `.pi/bash-in-docker.json`;
+- Pi was started before `.pi/pi-bash-in-docker/config.json` existed or before the container was running;
+- Pi was started from a directory that does not contain the project's `.pi/pi-bash-in-docker/config.json`;
 - the package is not installed/enabled, or Pi was started with `--no-extensions`;
 - the command was run in an external terminal/API harness instead of Pi's `bash` tool or user `!` command.
 
@@ -317,7 +317,7 @@ When helping the user, include:
 
 - container/image name;
 - exact `docker build` and `docker run` or `docker compose up` commands;
-- `.pi/bash-in-docker.json` contents when used;
+- `.pi/pi-bash-in-docker/config.json` contents when used;
 - exact Pi invocation; prefer plain `pi` after install/config, otherwise include extension flags;
 - dev server URL if applicable;
 - commands to inspect logs and stop background processes.
