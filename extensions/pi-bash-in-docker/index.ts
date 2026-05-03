@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { createBashTool, createLocalBashOperations, type BashOperations } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
@@ -20,6 +20,8 @@ type RuntimeConfig = DockerConfig & {
 	source: ConfigSource;
 	autoStart: boolean;
 	check: boolean;
+	stopOnLastExit: boolean;
+	lifecycleDir?: string;
 };
 
 type ProjectConfig = {
@@ -34,6 +36,7 @@ type ProjectConfig = {
 	env?: string[] | Record<string, string | number | boolean> | string;
 	check?: boolean;
 	autoStart?: boolean;
+	stopOnLastExit?: boolean;
 };
 
 type ExecResult = {
@@ -51,6 +54,8 @@ const PROJECT_CONFIG_PATH = ".pi/pi-bash-in-docker/config.json";
 const LEGACY_CONFIG_PATHS = [".pi/bash-in-docker.json", ".pi/docker-bash.json"];
 const CONFIG_PATHS = [PROJECT_CONFIG_PATH, ...LEGACY_CONFIG_PATHS];
 const PROJECT_DOCKER_DIR = ".pi/pi-bash-in-docker";
+const PROCESS_LIST_FILE = "processes.json";
+const PROCESS_LOCK_DIR = ".processes.lock";
 const COMPOSE_FILES = ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"];
 
 function flagString(pi: ExtensionAPI, name: string): string | undefined {
@@ -292,6 +297,8 @@ function loadConfig(pi: ExtensionAPI, defaultLocalCwd: string): RuntimeConfig | 
 		source,
 		autoStart: flagBoolean(pi, "docker-auto-start") || asBoolean(projectConfig.autoStart) || envBoolean("PI_DOCKER_AUTO_START"),
 		check: flagBoolean(pi, "docker-check") || asBoolean(projectConfig.check) || envBoolean("PI_DOCKER_CHECK"),
+		stopOnLastExit: flagBoolean(pi, "docker-stop-on-last-exit") || asBoolean(projectConfig.stopOnLastExit) || envBoolean("PI_DOCKER_STOP_ON_LAST_EXIT"),
+		lifecycleDir: project ? join(defaultLocalCwd, dirname(project.path)) : undefined,
 	};
 }
 
@@ -316,6 +323,77 @@ function shellQuote(value: string): string {
 
 function formatDockerCommand(args: string[]): string {
 	return `docker ${args.map(shellQuote).join(" ")}`;
+}
+
+type ProcessList = {
+	pids?: number[];
+};
+
+function pidExists(pid: number): boolean {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+async function withProcessListLock<T>(dir: string, fn: () => T | Promise<T>): Promise<T> {
+	const lockDir = join(dir, PROCESS_LOCK_DIR);
+	mkdirSync(dir, { recursive: true });
+	const deadline = Date.now() + 5_000;
+	while (true) {
+		try {
+			mkdirSync(lockDir);
+			break;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			if (Date.now() > deadline) {
+				rmSync(lockDir, { recursive: true, force: true });
+				continue;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	}
+	try {
+		return await fn();
+	} finally {
+		rmSync(lockDir, { recursive: true, force: true });
+	}
+}
+
+function readProcessList(dir: string): number[] {
+	const path = join(dir, PROCESS_LIST_FILE);
+	if (!existsSync(path)) return [];
+	try {
+		const data = JSON.parse(readFileSync(path, "utf-8")) as ProcessList;
+		return Array.isArray(data.pids) ? data.pids.filter((pid) => Number.isInteger(pid) && pid > 0) : [];
+	} catch {
+		return [];
+	}
+}
+
+function writeProcessList(dir: string, pids: number[]): void {
+	const path = join(dir, PROCESS_LIST_FILE);
+	const tmpPath = `${path}.${process.pid}.tmp`;
+	writeFileSync(tmpPath, `${JSON.stringify({ pids }, null, 2)}\n`);
+	renameSync(tmpPath, path);
+}
+
+async function addCurrentProcess(dir: string): Promise<void> {
+	await withProcessListLock(dir, () => {
+		const pids = Array.from(new Set([...readProcessList(dir), process.pid])).filter(pidExists);
+		writeProcessList(dir, pids);
+	});
+}
+
+async function removeCurrentProcess(dir: string): Promise<number[]> {
+	return withProcessListLock(dir, () => {
+		const pids = readProcessList(dir).filter((pid) => pid !== process.pid && pidExists(pid));
+		writeProcessList(dir, pids);
+		return pids;
+	});
 }
 
 function summarizeStep(label: string, args: string[], result: ExecResult): string {
@@ -393,11 +471,18 @@ export default function (pi: ExtensionAPI) {
 		type: "boolean",
 		default: false,
 	});
+	pi.registerFlag("docker-stop-on-last-exit", {
+		description: "Stop the configured Docker container when the last Pi process using this project config exits",
+		type: "boolean",
+		default: false,
+	});
 
 	const initialCwd = process.cwd();
 	const localOps = createLocalBashOperations();
 	let config: RuntimeConfig | undefined;
 	let statusTimer: NodeJS.Timeout | undefined;
+	let activeLifecycleDir: string | undefined;
+	let activeLifecycleConfig: RuntimeConfig | undefined;
 
 	async function refreshDockerMode(ctx: ExtensionContext, options?: { notify?: boolean; allowAutoStart?: boolean }): Promise<void> {
 		const candidate = loadConfig(pi, ctx.cwd);
@@ -437,6 +522,33 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`Docker bash disabled; bash commands run on host: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		}
+	}
+
+	async function stopContainerAfterLastExit(lifecycleConfig: RuntimeConfig): Promise<void> {
+		const composeDir = findComposeDir(lifecycleConfig.localCwd);
+		if (composeDir) {
+			try {
+				const service = await inferComposeService(composeDir);
+				const result = await docker(["compose", "stop", service], { cwd: composeDir, timeoutMs: 30_000 });
+				if (result.exitCode === 0) return;
+			} catch {
+				// Fall back to stopping the configured container by name below.
+			}
+		}
+		await docker(["stop", lifecycleConfig.container], { timeoutMs: 30_000 });
+	}
+
+	async function updateLifecycleRegistration(): Promise<void> {
+		const nextDir = config?.stopOnLastExit ? config.lifecycleDir : undefined;
+		if (activeLifecycleDir && activeLifecycleDir !== nextDir) {
+			await removeCurrentProcess(activeLifecycleDir);
+			activeLifecycleDir = undefined;
+			activeLifecycleConfig = undefined;
+		}
+		if (!nextDir || !config) return;
+		await addCurrentProcess(nextDir);
+		activeLifecycleDir = nextDir;
+		activeLifecycleConfig = config;
 	}
 
 	const dockerOps = createDockerBashOps(() => config, localOps);
@@ -539,6 +651,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		await refreshDockerMode(ctx, { notify: true, allowAutoStart: true });
+		await updateLifecycleRegistration();
 		if (statusTimer) clearInterval(statusTimer);
 		if (ctx.hasUI) {
 			statusTimer = setInterval(() => {
@@ -548,9 +661,16 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", async (event) => {
 		if (statusTimer) clearInterval(statusTimer);
 		statusTimer = undefined;
+		if (event.reason !== "quit" || !activeLifecycleDir || !activeLifecycleConfig) return;
+		const dir = activeLifecycleDir;
+		const lifecycleConfig = activeLifecycleConfig;
+		activeLifecycleDir = undefined;
+		activeLifecycleConfig = undefined;
+		const remainingPids = await removeCurrentProcess(dir);
+		if (remainingPids.length === 0) await stopContainerAfterLastExit(lifecycleConfig);
 	});
 
 	pi.on("user_bash", () => {
@@ -604,11 +724,13 @@ export default function (pi: ExtensionAPI) {
 				source: "flag",
 				autoStart: false,
 				check: false,
+				stopOnLastExit: false,
 			};
 			const result = await docker(["start", container], { timeoutMs: 30_000 });
 			if (result.exitCode === 0) {
 				ensureBashOverrideRegistered();
 				config = { ...nextConfig, container };
+				await updateLifecycleRegistration();
 				if (ctx.hasUI) {
 					setBashStatus(ctx, config, "running", true);
 					ctx.ui.notify(`Started Docker container: ${container}`, "info");
@@ -638,10 +760,14 @@ export default function (pi: ExtensionAPI) {
 				source: "flag" as const,
 				autoStart: false,
 				check: false,
+				stopOnLastExit: false,
 			};
 			const result = await docker(["stop", container], { timeoutMs: 30_000 });
 			if (result.exitCode === 0) {
-				if (config?.container === container) config = undefined;
+				if (config?.container === container) {
+					config = undefined;
+					await updateLifecycleRegistration();
+				}
 				if (ctx.hasUI) {
 					setBashStatus(ctx, { ...statusConfig, container }, "stopped", false);
 					ctx.ui.notify(`Stopped Docker container: ${container}; bash commands run on host`, "info");

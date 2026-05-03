@@ -21,7 +21,8 @@ Recommended project config:
   "containerCwd": "/workspace",
   "shell": "sh",
   "check": true,
-  "autoStart": true
+  "autoStart": true,
+  "stopOnLastExit": false
 }
 ```
 
@@ -53,6 +54,7 @@ Important flags:
 --docker-env KEY=VALUE,...        Optional env passed to docker exec
 --docker-check                    Validate container/cwd on startup
 --docker-auto-start               Start stopped configured container on session start
+--docker-stop-on-last-exit        Stop when the last Pi process using this project config exits
 ```
 
 The extension also provides a host-side agent tool and slash commands:
@@ -98,7 +100,8 @@ cat > .pi/pi-bash-in-docker/config.json <<'JSON'
   "containerCwd": "/workspace",
   "shell": "sh",
   "check": true,
-  "autoStart": true
+  "autoStart": true,
+  "stopOnLastExit": false
 }
 JSON
 ```

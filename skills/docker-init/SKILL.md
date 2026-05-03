@@ -122,10 +122,11 @@ If the user asks for a non-interactive/default setup, choose sensible defaults a
      "containerCwd": "/workspace",
      "shell": "sh",
      "check": true,
-     "autoStart": true
+     "autoStart": true,
+     "stopOnLastExit": false
    }
    ```
-   Create `.pi/pi-bash-in-docker/` if needed. This lets the user run plain `pi` after installing the public package.
+   Create `.pi/pi-bash-in-docker/` if needed. This lets the user run plain `pi` after installing the public package. Set `stopOnLastExit` to `true` only if the user wants the extension to stop the container/Compose service when the last Pi process using this config quits.
 
 9. Create or update compose if the user wants lifecycle convenience.
    If Docker files are at the project root, a good default compose file is:

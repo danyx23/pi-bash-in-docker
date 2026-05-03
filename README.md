@@ -96,11 +96,14 @@ Create `.pi/pi-bash-in-docker/config.json` in a project to make flags optional:
   "containerCwd": "/workspace",
   "shell": "sh",
   "check": true,
-  "autoStart": true
+  "autoStart": true,
+  "stopOnLastExit": false
 }
 ```
 
 `autoStart: true` lets the extension start an existing stopped container on Pi startup. If the container does not exist, create it with `docker run` or Compose first.
+
+`stopOnLastExit: true` makes the extension record active Pi process IDs in `.pi/pi-bash-in-docker/processes.json`. On Pi quit, it removes the current PID, prunes stale PIDs, and if no other live Pi process is using the same project config, it stops the Compose service (`docker compose stop <service>`) when a Compose file is available, otherwise it falls back to `docker stop <container>`.
 
 ## Flags
 
@@ -115,9 +118,10 @@ Flags override project config:
 --docker-env KEY=VALUE,...        Optional env entries for docker exec
 --docker-check                    Validate container/cwd on session start
 --docker-auto-start               Start stopped configured container on session start
+--docker-stop-on-last-exit        Stop the container when the last Pi process using this project config exits
 ```
 
-Environment variable equivalents: `PI_DOCKER_CONTAINER`, `PI_DOCKER_CWD`, `PI_DOCKER_LOCAL_CWD`, `PI_DOCKER_SHELL`, `PI_DOCKER_USER`, `PI_DOCKER_ENV`, `PI_DOCKER_CHECK`, `PI_DOCKER_AUTO_START`.
+Environment variable equivalents: `PI_DOCKER_CONTAINER`, `PI_DOCKER_CWD`, `PI_DOCKER_LOCAL_CWD`, `PI_DOCKER_SHELL`, `PI_DOCKER_USER`, `PI_DOCKER_ENV`, `PI_DOCKER_CHECK`, `PI_DOCKER_AUTO_START`, `PI_DOCKER_STOP_ON_LAST_EXIT`.
 
 ## Agent Tools
 
