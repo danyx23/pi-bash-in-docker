@@ -1,8 +1,10 @@
 # pi-bash-in-docker
 
-A public Pi extension that keeps Pi running on the host while routing Pi's `bash` tool calls and user `!` commands into a Docker container.
+A Pi extension that keeps Pi running on the host while routing Pi's `bash` tool calls and user `!` commands into a Docker container.
 
-This is useful on macOS when you want native host integrations such as Glimpse, but want builds, tests, package installs, and dev commands to run in Linux/Docker.
+This is useful when you want native host integrations for pi extensions such as Glimpse, which don't work too well if you run pi itself inside a docker container. Because pi uses only 4 tools (read, write, edit, bash), redirecting bash to run inside a docker container while running pi on the host gives you sandboxing of all programs that are executed via bash (builds, tests, ad-hoc scripts, ...), while at the same time allowing extensions to run on the host and all session logs to remain there as well.
+
+[Gondolin](https://earendil-works.github.io/gondolin/cli/) is another interesting sandboxing alternative that supports a similar idea and integrates with pi. It uses QEMU as a micro-vm and has really powerful control over http (e.g. you can do secret injection from the host which can be really nice), but, at the time of writing, it only support HTTP traffic. If you want to be able to do full outgoing network traffic, or if you like the familiarity of docker, pi-bash-in-docker is a good choice; if you want a more lightweight virtualization, control http traffic in detail, or have more control over mapped files etc in the sandbox, give gondolin a try.
 
 ## Install
 
@@ -12,13 +14,39 @@ Install the extension from GitHub:
 pi install https://github.com/danyx23/pi-bash-in-docker
 ```
 
-Then start Pi normally from a project that has Docker bash configured:
+Then start Pi
 
 ```bash
 pi
 ```
 
-The extension enables Docker routing at Pi session startup only when Docker mode is explicitly configured. If you create `.pi/pi-bash-in-docker/config.json`, create/start the container, or change Docker settings inside an already-running Pi session, start a new Pi session or use `/docker-start` before expecting `bash` tool calls and `!` commands to route into Docker.
+If you use the default statusline, you will see a new line at the bottom that says "Bash: host". This tells you that currently, bash commands by pi will run on the host and not be sandboxed. To set up the docker container, use the init skill:
+
+```text
+/skill:docker-init
+```
+
+It can re-use an existing development docker setup (like a VS Code devcontainer setup), or create a new Dockerfile, `.dockerignore`, and Docker Compose setup.
+
+In both cases, it will write a new `.pi/pi-bash-in-docker/config.json` so future sessions work without flags. The setup skill can place the Docker files either at the project root or under `.pi/pi-bash-in-docker/` for easy gitignore/local-dev isolation.
+
+Once the configuration is complete (or the next time you start a new `pi` session) use the `/docker-start` command or the `/skill:docker-container-lifecycle` skill to fire up the docker container. Once this is running, the status line should tell you that and show something like "Bash: docker PROJECT:/workspace ● running".
+
+`Bash` tool calls and `!` commands will now execute inside the docker container. You can try it with
+
+```bash
+!uname -s
+```
+which should print linux even when on a darwin host.
+
+If `uname -s` returns `Darwin`, that command is running on macOS, not in the Docker-routed Pi bash tool. Common causes:
+
+- Pi was started before `.pi/pi-bash-in-docker/config.json` existed or before the container was running;
+- Pi was started from a different directory than the project root containing `.pi/pi-bash-in-docker/config.json`;
+- the command was run in an external terminal/API harness instead of Pi's `bash` tool or user `!` command;
+- the package was not installed/enabled, or Pi was started with `--no-extensions`.
+
+Use `/docker-status` and `/docker-doctor` inside Pi for diagnostics.
 
 ## How Activation Works
 
@@ -33,62 +61,9 @@ It activates only when one of these explicit configuration sources exists:
 
 With project config, plain `pi` is enough. Without one of those activation sources, the extension does not override Pi's built-in `bash` tool.
 
-## Quick Project Setup
-
-Inside Pi, use the included setup skill:
-
-```text
-/skill:docker-init
-```
-
-It can create or improve Dockerfile, `.dockerignore`, Compose setup, and `.pi/pi-bash-in-docker/config.json` so future sessions work without flags. The setup skill can place the Docker files either at the project root or under `.pi/pi-bash-in-docker/` for easy gitignore/local-dev isolation.
-
-## Verify Activation
-
-When Docker bash is active, Pi shows a `Docker: <container>:/workspace` status item and a startup notification like `Docker bash enabled ...`.
-
-Inside Pi, verify routing with:
-
-```bash
-!uname -s
-!pwd
-!id
-```
-
-Expected:
-
-```text
-Linux
-/workspace
-```
-
-If `uname -s` returns `Darwin`, that command is running on macOS, not in the Docker-routed Pi bash tool. Common causes:
-
-- Pi was started before `.pi/pi-bash-in-docker/config.json` existed or before the container was running;
-- Pi was started from a different directory than the project root containing `.pi/pi-bash-in-docker/config.json`;
-- the command was run in an external terminal/API harness instead of Pi's `bash` tool or user `!` command;
-- the package was not installed/enabled, or Pi was started with `--no-extensions`.
-
-Use `/docker-status` and `/docker-doctor` inside Pi for diagnostics.
-
-## Recommended Container
-
-```bash
-docker build -t pi-tools-image .
-
-docker run -d \
-  --init \
-  --name pi-tools \
-  -v "$PWD":/workspace \
-  -w /workspace \
-  -p 3000:3000 \
-  pi-tools-image \
-  sleep infinity
-```
-
 ## Project Config
 
-Create `.pi/pi-bash-in-docker/config.json` in a project to make flags optional:
+Create `.pi/pi-bash-in-docker/config.json` in a project to make flags optional (or have the `/skill:docker-init` create if for you after asking you a few questions).
 
 ```json
 {
