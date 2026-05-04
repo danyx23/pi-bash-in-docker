@@ -6,6 +6,8 @@ This is useful when you want native host integrations for pi extensions such as 
 
 [Gondolin](https://earendil-works.github.io/gondolin/cli/) is another interesting sandboxing alternative that supports a similar idea and integrates with pi. It uses QEMU as a micro-vm and has really powerful control over http (e.g. you can do secret injection from the host which can be really nice), but, at the time of writing, it only support HTTP traffic. If you want to be able to do full outgoing network traffic, or if you like the familiarity of docker, pi-bash-in-docker is a good choice; if you want a more lightweight virtualization, control http traffic in detail, or have more control over mapped files etc in the sandbox, give gondolin a try.
 
+This extension is used by myself but otherwise still experimental. Give it a spin and let me know if works for you or how it could be improved.
+
 ## Install
 
 Install the extension from GitHub:
