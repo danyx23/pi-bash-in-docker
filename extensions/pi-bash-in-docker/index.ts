@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { createBashTool, createLocalBashOperations, type BashOperations } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createLocalBashOperations, type BashOperations } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 type ConfigSource = "flag" | "project" | "legacy-project" | "env";
